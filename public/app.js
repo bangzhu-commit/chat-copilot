@@ -20,8 +20,29 @@ let fullTranscript = '';         // 全量转写文本
 let newTextSinceLastTrigger = ''; // 上次触发后的新增文本
 let suggestionCount = 0;
 
-// 脚本内容
+// 上传资料内容
 let scriptContent = '';
+
+const SCENE_UI = {
+  'sales-negotiation': {
+    label: 'Deal',
+    title: 'AI 实时洞察',
+    emptyTitle: '等待销售洞察',
+    emptyHint: '可识别事实、风险、推荐动作和谈判提醒'
+  },
+  'candidate-interview': {
+    label: 'Answer',
+    title: 'AI 回答提示',
+    emptyTitle: '等待回答提示',
+    emptyHint: '可识别问题意图、回答结构、可用素材和风险'
+  },
+  default: {
+    label: 'Cue',
+    title: 'AI 追问建议',
+    emptyTitle: '等待追问建议',
+    emptyHint: '有对话内容后可自动生成，也可手动触发'
+  }
+};
 
 // 配置（从后端加载）
 let appConfig = {
@@ -47,10 +68,13 @@ const $btnToggle = document.getElementById('btnToggle');
 const $scriptStatus = document.getElementById('scriptStatus');
 const $suggestionsContainer = document.getElementById('suggestionsContainer');
 const $suggestionCount = document.getElementById('suggestionCount');
+const $suggestionPanelLabel = document.getElementById('suggestionPanelLabel');
+const $suggestionPanelTitle = document.getElementById('suggestionPanelTitle');
 const $transcriptContainer = document.getElementById('transcriptContainer');
 const $interimText = document.getElementById('interimText');
 const $charCount = document.getElementById('charCount');
 const $btnScrollLock = document.getElementById('btnScrollLock');
+const $btnInterviewReview = document.getElementById('btnInterviewReview');
 const $statusDot = document.getElementById('statusDot');
 const $statusText = document.getElementById('statusText');
 const $asrStatus = document.getElementById('asrStatus');
@@ -61,10 +85,11 @@ const $elapsedTime = document.getElementById('elapsedTime');
 async function init() {
   await loadConfig();
   await loadAudioDevices();
+  onSceneModeChange();
   setStatus('ready', '就绪');
 
   if (!appConfig.hasAsrConfig) {
-    $asrStatus.textContent = 'ASR: ⚠️ 未配置';
+    $asrStatus.textContent = 'ASR: 未配置';
     $asrStatus.style.color = '#ef4444';
   } else {
     $asrStatus.textContent = 'ASR: 豆包 Seed-ASR 2.0';
@@ -80,6 +105,19 @@ function onSceneModeChange() {
   } else {
     $customPromptRow.style.display = 'none';
   }
+
+  const ui = SCENE_UI[mode] || SCENE_UI.default;
+  $suggestionPanelLabel.textContent = ui.label;
+  $suggestionPanelTitle.textContent = ui.title;
+  $btnInterviewReview.style.display = mode === 'candidate-interview' ? '' : 'none';
+
+  const emptyState = $suggestionsContainer.querySelector('.empty-state');
+  if (emptyState) {
+    emptyState.innerHTML = `
+      <p>${ui.emptyTitle}</p>
+      <p class="hint">${ui.emptyHint}</p>
+    `;
+  }
 }
 
 async function loadConfig() {
@@ -87,7 +125,7 @@ async function loadConfig() {
     const res = await fetch('/api/config');
     appConfig = await res.json();
     if (!appConfig.hasApiKey) {
-      $llmStatus.textContent = 'LLM: ⚠️ Key 未配置';
+      $llmStatus.textContent = 'LLM: Key 未配置';
       $llmStatus.style.color = '#ef4444';
     }
   } catch (e) {
@@ -144,14 +182,14 @@ function connectAsrWebSocket() {
 
     asrWs.onerror = (err) => {
       console.error('ASR WebSocket 错误:', err);
-      $asrStatus.textContent = 'ASR: ❌ 连接错误';
+      $asrStatus.textContent = 'ASR: 连接错误';
       reject(err);
     };
 
     asrWs.onclose = () => {
       console.log('ASR WebSocket 已关闭');
       if (isRecording) {
-        $asrStatus.textContent = 'ASR: ⚠️ 连接断开';
+        $asrStatus.textContent = 'ASR: 连接断开';
       }
     };
   });
@@ -160,7 +198,7 @@ function connectAsrWebSocket() {
 function handleAsrMessage(msg) {
   switch (msg.type) {
     case 'ready':
-      $asrStatus.textContent = 'ASR: 🟢 识别中';
+      $asrStatus.textContent = 'ASR: 识别中';
       break;
 
     case 'asr_result':
@@ -169,12 +207,12 @@ function handleAsrMessage(msg) {
 
     case 'error':
       console.error('ASR 错误:', msg.message);
-      $asrStatus.textContent = `ASR: ❌ ${msg.message}`;
+      $asrStatus.textContent = `ASR: ${msg.message}`;
       break;
 
     case 'disconnected':
       if (isRecording) {
-        $asrStatus.textContent = 'ASR: ⚠️ 服务断开';
+        $asrStatus.textContent = 'ASR: 服务断开';
       }
       break;
   }
@@ -280,9 +318,9 @@ async function startRecording() {
 
   try {
     setStatus('recording', '连接中...');
-    $btnToggle.textContent = '⏳ 连接中';
+    $btnToggle.textContent = '连接中';
     $btnToggle.disabled = true;
-    $asrStatus.textContent = 'ASR: 🔄 连接中...';
+    $asrStatus.textContent = 'ASR: 连接中...';
 
     // 先建立 WebSocket，等待 ready
     await connectAsrWebSocket();
@@ -292,7 +330,7 @@ async function startRecording() {
 
     isRecording = true;
     lastFinalText = '';
-    $btnToggle.textContent = '⏹ 停止';
+    $btnToggle.textContent = '停止';
     $btnToggle.disabled = false;
     $btnToggle.classList.add('recording');
     setStatus('recording', '录音中');
@@ -307,10 +345,10 @@ async function startRecording() {
 
   } catch (err) {
     console.error('启动失败:', err);
-    $btnToggle.textContent = '▶ 开始';
+    $btnToggle.textContent = '开始';
     $btnToggle.disabled = false;
     setStatus('error', '启动失败');
-    $asrStatus.textContent = 'ASR: ❌ 启动失败';
+    $asrStatus.textContent = 'ASR: 启动失败';
     alert('启动语音识别失败: ' + (err.message || '请检查麦克风权限'));
 
     // 清理
@@ -340,7 +378,7 @@ function stopRecording() {
   stopAudioCapture();
   clearSilenceTimer();
 
-  $btnToggle.textContent = '▶ 开始';
+  $btnToggle.textContent = '开始';
   $btnToggle.classList.remove('recording');
   setStatus('ready', '已停止');
   $asrStatus.textContent = 'ASR: 已停止';
@@ -387,7 +425,7 @@ function clearTranscript() {
 
 function toggleScrollLock() {
   autoScroll = !autoScroll;
-  $btnScrollLock.textContent = autoScroll ? '自动滚动 ✅' : '自动滚动 ❌';
+  $btnScrollLock.textContent = autoScroll ? '自动滚动：开' : '自动滚动：关';
   if (autoScroll) {
     $transcriptContainer.scrollTop = $transcriptContainer.scrollHeight;
   }
@@ -446,7 +484,7 @@ async function generateSuggestions() {
   const textForThisTrigger = newTextSinceLastTrigger;
   newTextSinceLastTrigger = '';
 
-  $llmStatus.textContent = 'LLM: ⏳ 生成中...';
+  $llmStatus.textContent = 'LLM: 生成中...';
   $llmStatus.style.color = '#f59e0b';
 
   try {
@@ -466,7 +504,7 @@ async function generateSuggestions() {
 
     if (!res.ok) {
       console.error('生成失败:', data.error);
-      $llmStatus.textContent = `LLM: ❌ ${data.error}`;
+      $llmStatus.textContent = `LLM: ${data.error}`;
       $llmStatus.style.color = '#ef4444';
       // 把文本还回去，下次还能用
       newTextSinceLastTrigger = textForThisTrigger + newTextSinceLastTrigger;
@@ -477,7 +515,7 @@ async function generateSuggestions() {
       addSuggestionGroup(data.suggestions);
     }
 
-    $llmStatus.textContent = `LLM: ✅ 已生成（${data.model || ''})`;
+    $llmStatus.textContent = `LLM: 已生成（${data.model || ''})`;
     $llmStatus.style.color = '#22c55e';
 
     // 3 秒后恢复待命状态
@@ -490,7 +528,7 @@ async function generateSuggestions() {
 
   } catch (err) {
     console.error('请求失败:', err);
-    $llmStatus.textContent = 'LLM: ❌ 网络错误';
+    $llmStatus.textContent = 'LLM: 网络错误';
     $llmStatus.style.color = '#ef4444';
     newTextSinceLastTrigger = textForThisTrigger + newTextSinceLastTrigger;
   } finally {
@@ -498,8 +536,59 @@ async function generateSuggestions() {
   }
 }
 
+async function generateInterviewReview() {
+  if ($sceneMode.value !== 'candidate-interview') return;
+  if (fullTranscript.trim().length === 0) {
+    alert('还没有面试转写内容，无法复盘。');
+    return;
+  }
+  if (isGenerating) {
+    alert('正在生成中，请稍候...');
+    return;
+  }
+
+  isGenerating = true;
+  $btnInterviewReview.disabled = true;
+  $llmStatus.textContent = 'LLM: 复盘中...';
+  $llmStatus.style.color = '#f59e0b';
+
+  try {
+    const res = await fetch('/api/interview-review', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript: fullTranscript,
+        scriptContent: scriptContent || ''
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('复盘失败:', data.error);
+      $llmStatus.textContent = `LLM: ${data.error}`;
+      $llmStatus.style.color = '#ef4444';
+      return;
+    }
+
+    if (data.review) {
+      addSuggestionGroup(data.review, 'review');
+    }
+
+    $llmStatus.textContent = `LLM: 已复盘（${data.model || ''})`;
+    $llmStatus.style.color = '#22c55e';
+  } catch (err) {
+    console.error('复盘请求失败:', err);
+    $llmStatus.textContent = 'LLM: 网络错误';
+    $llmStatus.style.color = '#ef4444';
+  } finally {
+    isGenerating = false;
+    $btnInterviewReview.disabled = false;
+  }
+}
+
 // ── 追问建议显示 ──────────────────────────────────────────
-function addSuggestionGroup(rawText) {
+function addSuggestionGroup(rawText, groupType = 'suggestion') {
   const emptyState = $suggestionsContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
@@ -507,23 +596,43 @@ function addSuggestionGroup(rawText) {
   const lines = rawText.split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0)
-    .map(line => line.replace(/^\d+[\.\、\)]\s*/, ''));
+    .map(line => line
+      .replace(/^#{1,4}\s*/, '')
+      .replace(/^[-*]\s*/, '')
+      .replace(/^\d+[\.\、\)]\s*/, '')
+      .trim());
 
   if (lines.length === 0) return;
 
   // 创建建议组
   const group = document.createElement('div');
-  group.className = 'suggestion-group';
+  group.className = `suggestion-group ${groupType === 'review' ? 'review-group' : ''}`;
 
   const header = document.createElement('div');
   header.className = 'group-header';
-  header.textContent = formatTime(new Date());
+  header.textContent = groupType === 'review' ? `${formatTime(new Date())} · 面试复盘` : formatTime(new Date());
   group.appendChild(header);
 
   lines.forEach(text => {
     const card = document.createElement('div');
     card.className = 'suggestion-card';
     card.onclick = () => card.classList.toggle('used');
+
+    const tagMatch = text.match(/^(\[[^\]]+\])\s*(.*)$/);
+    if (tagMatch) {
+      const tagText = tagMatch[1].slice(1, -1);
+      text = tagMatch[2] || text;
+      card.classList.add(`tag-${getTagClass(tagText)}`);
+
+      const tag = document.createElement('div');
+      tag.className = 'suggestion-tag';
+      tag.textContent = tagText;
+      card.appendChild(tag);
+    }
+
+    if (groupType === 'review') {
+      card.classList.add('review-card');
+    }
 
     const textEl = document.createElement('div');
     textEl.className = 'suggestion-text';
@@ -539,7 +648,21 @@ function addSuggestionGroup(rawText) {
   $suggestionCount.textContent = suggestionCount;
 }
 
-// ── 脚本上传 ──────────────────────────────────────────────
+function getTagClass(tagText) {
+  const map = {
+    '事实': 'fact',
+    '风险': 'risk',
+    '推荐': 'action',
+    '谈判': 'deal',
+    '问题': 'question',
+    '考察点': 'intent',
+    '结构': 'structure',
+    '素材': 'material'
+  };
+  return map[tagText] || 'note';
+}
+
+// ── 资料上传 ──────────────────────────────────────────────
 async function uploadScript(input) {
   const file = input.files[0];
   if (!file) return;
@@ -561,7 +684,7 @@ async function uploadScript(input) {
     }
 
     scriptContent = data.content;
-    $scriptStatus.textContent = `📋 已加载脚本: ${data.filename} (${data.charCount} 字)`;
+    $scriptStatus.textContent = `已加载资料: ${data.filename} (${data.charCount} 字)`;
   } catch (err) {
     alert('上传失败: ' + err.message);
   }
@@ -590,7 +713,7 @@ function updateElapsedTime() {
   const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
   const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
   const s = String(elapsed % 60).padStart(2, '0');
-  $elapsedTime.textContent = `⏱ ${h}:${m}:${s}`;
+  $elapsedTime.textContent = `${h}:${m}:${s}`;
 }
 
 // ── 快捷键 ────────────────────────────────────────────────

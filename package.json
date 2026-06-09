@@ -1,7 +1,7 @@
 {
   "name": "ba-tian-liao-xia-qu",
   "version": "1.0.0",
-  "description": "把天聊下去 - 直播主持人 AI 副驾应用",
+  "description": "把天聊下去 - 实时对话 AI 副驾应用",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

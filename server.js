@@ -10,9 +10,9 @@ const zlib = require('zlib');
 
 // ── 从 .env 读取配置 ──────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-const LLM_ENDPOINT = process.env.LLM_ENDPOINT || 'https://openrouter.ai/api/v1/chat/completions';
+const LLM_ENDPOINT = process.env.LLM_ENDPOINT || 'https://api.deepseek.com/chat/completions';
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
-const LLM_MODEL = process.env.LLM_MODEL || 'openai/gpt-4o-mini';
+const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
 
 // 追问触发参数（可在 .env 覆盖，一般不用动）
 const SILENCE_THRESHOLD = parseInt(process.env.SILENCE_THRESHOLD) || 3000;
@@ -36,7 +36,7 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── 文件上传（脚本/嘉宾资料）────────────────────────────────
+// ── 文件上传（脚本/嘉宾资料/业务资料）──────────────────────────
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 }
@@ -53,7 +53,7 @@ app.post('/api/upload-script', upload.single('file'), (req, res) => {
   }
 
   const content = req.file.buffer.toString('utf-8');
-  console.log(`📄 收到脚本文件: ${req.file.originalname} (${content.length} 字)`);
+  console.log(`📄 收到资料文件: ${req.file.originalname} (${content.length} 字)`);
 
   res.json({
     success: true,
@@ -104,6 +104,33 @@ const SCENE_PROMPTS = {
 ## 输出格式
 直接输出追问建议，每条一行，用序号标注（如 1. 2. 3.）。不需要任何解释或前缀。`,
 
+  'candidate-interview': `你是一位求职面试实时助手。你的任务是帮助候选人听懂 HR/面试官的问题意图，并结合候选人上传的简历、JD、项目资料，给出回答框架、可用素材和风险提醒。
+
+## 你的工作原则
+1. 先识别面试官刚才问的问题，包含"介绍一下自己"、"讲讲这个项目"这类非问号式问题
+2. 判断考察点——能力、动机、稳定性、协作、抗压、业务理解、岗位匹配等
+3. 推荐回答结构——优先使用 STAR、CAR、PAR，不替候选人编造具体经历
+4. [素材] 只能复述上传资料或转写中出现过的信息，不要添加资料里没有的具体动作、工具或数据
+5. 不要写"如/例如/比如"后接资料里没出现的动作；需要补细节时，用[风险]提醒"资料未提供具体动作"
+6. 帮候选人补结果、补数据、补角色、补行动，避免空泛和背稿感
+7. 每次输出 3-5 条短提示，候选人只能瞄一眼，每条不超过 42 个字
+
+## 输出格式
+直接输出带标签的短提示，每条一行。标签只能使用：[问题] [考察点] [结构] [素材] [风险]。不需要任何解释或前缀。`,
+
+  'sales-negotiation': `你是一位销售/商务谈判实时副驾。你的任务是根据对话内容，帮助销售或商务人员实时识别事实、风险、推进机会和谈判提醒。
+
+## 你的工作原则
+1. 严格区分事实和推断；只把对方明确说出的内容写成[事实]
+2. 用 SPIN 发现处境、问题、影响和收益，用 MEDDICC 判断商机质量、决策链、竞品和痛点强度
+3. 留意预算、决策人、采购流程、时间线、竞品、成功标准、下一步承诺
+4. 用 BATNA/ZOPA 和原则式谈判提醒底线、替代方案、客观标准和条件交换
+5. 不鼓励压迫式话术；推荐用探索、确认、澄清、条件交换推进
+6. 每次输出 3-5 条短洞察，销售只能瞄一眼，每条不超过 42 个字
+
+## 输出格式
+直接输出带标签的短提示，每条一行。标签只能使用：[事实] [风险] [推荐] [谈判]。不需要任何解释或前缀。`,
+
   'recording': `你是一位内容创作教练。你的任务是根据口播录制内容，为说话者生成引导性建议。
 
 ## 你的工作原则
@@ -131,6 +158,116 @@ const SCENE_PROMPTS = {
 直接输出提问建议，每条一行，用序号标注（如 1. 2. 3.）。不需要任何解释或前缀。`
 };
 
+const INTERVIEW_REVIEW_PROMPT = `你是一位求职面试复盘教练。你的任务是基于完整面试转写和候选人上传资料，帮助候选人复盘表现。
+
+## 原则
+1. 只基于转写和上传资料评价，不编造经历或面试官意图
+2. 区分"已经回答到位"、"回答缺证据"、"下次可补充"
+3. 重点关注问题识别、结构完整度、项目证据、数据结果、岗位匹配和风险表达
+4. 输出要具体、可执行，帮助候选人准备下一轮
+5. 不要输出候选人姓名、面试轮次、占位符或无依据推测；未知信息直接省略
+6. 不要列出资料中没有的具体动作示例；可以提醒"需要补充个人动作和证据"
+
+## 输出格式
+用中文 Markdown 输出，包含：
+1. 问题清单
+2. 表现评估
+3. 需要补强的回答
+4. 可整理成 STAR 案例的经历
+5. 下一轮准备清单`;
+
+function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
+  let systemPrompt;
+  if (sceneMode === 'custom' && customPrompt && customPrompt.trim().length > 0) {
+    systemPrompt = customPrompt.trim();
+  } else {
+    systemPrompt = SCENE_PROMPTS[sceneMode] || SCENE_PROMPTS['live-host'];
+  }
+
+  if (scriptContent && scriptContent.trim().length > 0) {
+    systemPrompt += `\n\n## 上传资料\n${scriptContent.substring(0, 3000)}`;
+  }
+
+  return systemPrompt;
+}
+
+function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
+  let userPrompt = '';
+  if (previousSummary) {
+    userPrompt += `## 之前的对话摘要\n${previousSummary}\n\n`;
+  }
+  userPrompt += `## 最近的对话内容\n${transcript.slice(-3000)}`;
+
+  if (sceneMode === 'sales-negotiation') {
+    userPrompt += '\n\n请生成 3-5 条销售谈判实时洞察。必须使用 [事实] [风险] [推荐] [谈判] 标签。';
+  } else if (sceneMode === 'candidate-interview') {
+    userPrompt += '\n\n请生成 3-5 条求职面试回答提示。必须使用 [问题] [考察点] [结构] [素材] [风险] 标签。';
+  } else {
+    userPrompt += '\n\n请生成 2-3 条追问建议。';
+  }
+
+  return userPrompt;
+}
+
+function buildCandidateMaterialHint(scriptContent, transcript) {
+  const source = `${scriptContent || ''}\n${transcript || ''}`
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!source) {
+    return '[素材] 暂无上传资料可引用，先补真实项目和结果数据';
+  }
+
+  const segments = source
+    .split(/[。；;.\n]/)
+    .map(item => item.trim())
+    .filter(Boolean);
+  const matched = segments.find(item => /(转化率|提升|增长|负责|参与|项目|岗位|\d+\s*%|\d+\s*年)/.test(item));
+  const snippet = (matched || segments[0] || source).slice(0, 58);
+
+  return `[素材] 可引用资料：${snippet}`;
+}
+
+function sanitizeSuggestions(content, sceneMode, context = {}) {
+  if (sceneMode !== 'candidate-interview') return content;
+
+  const materialHint = buildCandidateMaterialHint(context.scriptContent, context.transcript);
+
+  return content.split('\n')
+    .map(line => line
+      .replace(/（[^）]*(如|例如|比如)[^）]*）/g, '')
+      .replace(/\([^)]*(如|例如|比如|for example|e\.g\.)[^)]*\)/gi, '')
+      .trim())
+    .map(line => line.startsWith('[素材]') ? materialHint : line)
+    .join('\n');
+}
+
+async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
+  const response = await fetch(LLM_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${LLM_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: LLM_MODEL,
+      messages,
+      temperature,
+      max_tokens: maxTokens
+    })
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    const err = new Error(`LLM 请求失败 (${response.status})`);
+    err.status = response.status;
+    err.detail = errText;
+    throw err;
+  }
+
+  return response.json();
+}
+
 // ── LLM 追问生成 API ─────────────────────────────────────
 app.post('/api/generate-suggestions', async (req, res) => {
   const { transcript, scriptContent, previousSummary, sceneMode, customPrompt } = req.body;
@@ -145,54 +282,18 @@ app.post('/api/generate-suggestions', async (req, res) => {
     });
   }
 
-  // 根据场景模式选择 system prompt
-  let systemPrompt;
-  if (sceneMode === 'custom' && customPrompt && customPrompt.trim().length > 0) {
-    systemPrompt = customPrompt.trim();
-  } else {
-    systemPrompt = SCENE_PROMPTS[sceneMode] || SCENE_PROMPTS['live-host'];
-  }
-
-  if (scriptContent && scriptContent.trim().length > 0) {
-    systemPrompt += `\n\n## 节目脚本/嘉宾资料\n${scriptContent.substring(0, 3000)}`;
-  }
-
-  let userPrompt = '';
-  if (previousSummary) {
-    userPrompt += `## 之前的对话摘要\n${previousSummary}\n\n`;
-  }
-  userPrompt += `## 最近的对话内容\n${transcript.slice(-3000)}`;
-  userPrompt += '\n\n请生成 2-3 条追问建议。';
+  const systemPrompt = getSystemPrompt(sceneMode, customPrompt, scriptContent);
+  const userPrompt = buildSuggestionUserPrompt(transcript, previousSummary, sceneMode);
 
   try {
-    const response = await fetch(LLM_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${LLM_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 300
-      })
+    const data = await callLlm([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ]);
+    const content = sanitizeSuggestions(data.choices?.[0]?.message?.content || '', sceneMode, {
+      scriptContent,
+      transcript
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('LLM API 错误:', response.status, errText);
-      return res.status(response.status).json({
-        error: `LLM 请求失败 (${response.status})`,
-        detail: errText
-      });
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || '';
     console.log(`💡 生成追问建议:\n${content}`);
 
     res.json({
@@ -202,8 +303,63 @@ app.post('/api/generate-suggestions', async (req, res) => {
       usage: data.usage
     });
   } catch (err) {
+    if (err.status) {
+      console.error('LLM API 错误:', err.status, err.detail);
+      return res.status(err.status).json({
+        error: err.message,
+        detail: err.detail
+      });
+    }
     console.error('LLM 调用异常:', err.message);
     res.status(500).json({ error: '调用 LLM 失败: ' + err.message });
+  }
+});
+
+// ── 求职面试复盘 API ─────────────────────────────────────
+app.post('/api/interview-review', async (req, res) => {
+  const { transcript, scriptContent } = req.body;
+
+  if (!transcript || transcript.trim().length === 0) {
+    return res.status(400).json({ error: '对话内容为空' });
+  }
+
+  if (!keyConfigured) {
+    return res.status(500).json({
+      error: 'API Key 未配置。请编辑项目根目录的 .env 文件，填入你的 LLM_API_KEY'
+    });
+  }
+
+  let systemPrompt = INTERVIEW_REVIEW_PROMPT;
+  if (scriptContent && scriptContent.trim().length > 0) {
+    systemPrompt += `\n\n## 候选人上传资料\n${scriptContent.substring(0, 3000)}`;
+  }
+
+  const userPrompt = `## 完整面试转写\n${transcript.slice(-8000)}\n\n请生成面试后复盘。`;
+
+  try {
+    const data = await callLlm([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ], { temperature: 0.4, maxTokens: 900 });
+    const content = data.choices?.[0]?.message?.content || '';
+    console.log(`🧭 生成面试复盘:\n${content}`);
+
+    res.json({
+      success: true,
+      review: content,
+      model: data.model || LLM_MODEL,
+      usage: data.usage
+    });
+  } catch (err) {
+    if (err.status) {
+      console.error('LLM API 错误:', err.status, err.detail);
+      return res.status(err.status).json({
+        error: err.message,
+        detail: err.detail
+      });
+    }
+    console.error('面试复盘调用异常:', err.message);
+    res.status(500).json({ error: '生成面试复盘失败: ' + err.message });
   }
 });
 

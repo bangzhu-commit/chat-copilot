@@ -4,7 +4,7 @@
 
 **你的 AI 对话副驾驶**
 
-实时听你说话，帮你想下一句该聊什么。
+实时听你说话，帮你识别问题、洞察风险、想清楚下一句。
 
 [![Node.js](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -13,11 +13,11 @@
 
 ---
 
-你有没有过这样的时刻——直播时嘉宾话音刚落，脑子突然一片空白；采访做到一半，不知道下一个问题该往哪里引；面试官问完一轮，候选人的回答里明明有值得追的点，但就是反应不过来？
+你有没有过这样的时刻——直播时嘉宾话音刚落，脑子突然一片空白；销售谈判里客户刚抛出价格异议，你还没来得及判断风险；求职面试时 HR 问完一个问题，你知道要回答，但一时想不起该按什么结构讲。
 
-**「把天聊下去」** 就是为这些时刻而生的。它实时监听对话内容，用 AI 帮你生成高质量的追问建议——你只需要瞄一眼屏幕，就知道下一句该聊什么。
+**「把天聊下去」** 就是为这些时刻而生的。它实时监听对话内容，用 AI 帮你生成场景化提示——你只需要瞄一眼屏幕，就知道下一句该追问什么、该补什么事实、哪里有风险。
 
-不是帮你写稿，不是帮你回答，而是帮你 **把天聊下去**。
+不是替你编话术，不是替你编经历，而是帮你 **把天聊下去**。
 
 ![demo](screenshots/demo.png)
 
@@ -26,10 +26,11 @@
 | 功能 | 说明 |
 |------|------|
 | 🗣️ **实时语音转写** | 基于豆包 Seed-ASR 2.0 大模型，高精度中文语音实时转文字 |
-| 💡 **AI 智能追问** | 检测到说话停顿后自动生成 2-3 条追问建议，也支持手动触发（`Cmd+Enter`） |
-| 🎭 **5 种场景模式** | 直播主持 / 访谈采访 / 招聘面试 / 口播录制 / 培训教学，各有专属 Prompt |
+| 💡 **AI 场景提示** | 检测到说话停顿后自动生成追问、洞察或回答提示，也支持手动触发（`Cmd+Enter`） |
+| 🎭 **7 种场景模式** | 直播主持 / 访谈采访 / 招聘面试（面试官） / 求职面试 / 销售谈判 / 口播录制 / 培训教学 |
 | ⚙️ **自定义指令** | 场景模式不够用？直接写你自己的 Prompt |
-| 📁 **脚本上传** | 上传节目脚本或嘉宾资料（.txt / .md），AI 会结合内容给出更贴合的追问 |
+| 📁 **资料上传** | 上传脚本、嘉宾资料、客户背景、简历或 JD（.txt / .md），AI 会结合内容给出更贴合的提示 |
+| 🧭 **面试后复盘** | 求职面试场景支持基于完整转写生成问题清单、薄弱项和下一轮准备清单 |
 | 🌙 **深色大字界面** | 直播环境不刺眼，大字号远距离也能看清 |
 
 ## 🎯 适用场景
@@ -40,8 +41,14 @@
 ### 🎤 访谈 / 采访
 记者、内容创作者的深度访谈助手。AI 从受访者的回答中捕捉值得深挖的细节，帮你追出好故事。
 
-### 👔 招聘面试
+### 👔 招聘面试（面试官）
 候选人回答完，AI 用 STAR 法则帮你找到模糊的部分——哪里该追数据、哪里该追细节，面试效率翻倍。
+
+### 🧑‍💼 求职面试
+HR 问完问题，AI 帮候选人识别考察点，提示 STAR/CAR/PAR 回答结构，并从上传的简历、JD、项目资料里找到可用素材。它不会替你编造经历，只做结构和证据提醒。
+
+### 🤝 销售谈判
+客户表达需求、预算、竞品或价格异议时，AI 会基于 SPIN、MEDDICC、BATNA/ZOPA 和原则式谈判，生成事实洞察、风险点、推荐动作和谈判提醒。
 
 ### 📹 口播录制
 一个人对着镜头讲，AI 充当你的编导——提示你补充案例、加个类比、转到下一个要点。
@@ -55,14 +62,14 @@
 
 - **Node.js v18+**（[下载](https://nodejs.org/) 或 `brew install node`）
 - **Chrome 浏览器**（麦克风兼容性最好）
-- **OpenRouter API Key**（[获取](https://openrouter.ai/keys)）— 用于 AI 追问生成
+- **OpenRouter API Key**（[获取](https://openrouter.ai/keys)）— 用于 AI 场景提示生成
 - **火山引擎凭证**（[获取](https://console.volcengine.com/speech/app)）— 用于语音识别
 
 ### 三步启动
 
 ```bash
 # 1. 克隆并安装
-git clone https://github.com/jianlongqiao-commits/chat-copilot.git
+git clone https://github.com/bangzhu-commit/chat-copilot.git
 cd chat-copilot
 npm install
 
@@ -96,7 +103,7 @@ npm start
 - **前端**：原生 HTML/CSS/JS，AudioWorklet 采集 16kHz PCM 音频流
 - **后端**：Node.js + Express + WebSocket，负责 ASR 协议转换和 LLM 调用
 - **语音识别**：火山引擎豆包 Seed-ASR 2.0 大模型，服务端实时转写
-- **AI 追问**：OpenRouter（兼容任何 OpenAI 格式 API），默认使用 DeepSeek
+- **AI 场景提示**：OpenRouter（兼容任何 OpenAI 格式 API），默认使用 DeepSeek
 
 ## ⚙️ 配置说明
 
@@ -134,16 +141,61 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 >
 > 只需修改 `.env` 中的 `LLM_ENDPOINT` 和 `LLM_API_KEY` 即可切换。
 
+## 📁 上传资料模板
+
+销售谈判建议上传：
+
+```markdown
+客户/嘉宾：姓名、角色、公司、权限范围
+我方目标：希望达成什么下一步
+底线：价格、交付、付款、不可承诺事项
+方案：产品卖点、案例、报价区间
+已知信息：痛点、预算、竞品、历史沟通
+```
+
+求职面试建议上传：
+
+```markdown
+目标岗位：岗位 JD 和关键要求
+候选人资料：简历、项目经历、优势
+重点素材：想强调的项目、数据、协作角色
+表达边界：不能夸大的经历、还没做过的能力
+目标公司：业务、产品、面试岗位背景
+```
+
 ## 🎭 场景模式说明
 
 | 模式 | 适用场景 | Prompt 策略 |
 |------|---------|------------|
 | 🎙️ 直播主持 | 直播、播客 | 观众视角追问，衔接上下文，不打断好话题 |
 | 🎤 访谈采访 | 记者、内容创作 | 追细节、追故事，避免封闭式问题 |
-| 👔 招聘面试 | HR、面试官 | STAR 法则追问，追数据和量化结果 |
+| 👔 招聘面试（面试官） | HR、面试官 | STAR 法则追问，追数据和量化结果 |
+| 🧑‍💼 求职面试 | 候选人、面试准备 | 识别问题意图，提示回答结构、素材和风险 |
+| 🤝 销售谈判 | 销售、商务、续约 | 识别事实、风险、推荐动作和谈判提醒 |
 | 📹 口播录制 | 自媒体录制 | 引导展开论述，补充案例和类比 |
 | 📚 培训教学 | 讲师、培训 | 模拟学员视角，追问不清楚的概念 |
 | ⚙️ 自定义 | 任意场景 | 你写什么 Prompt 就用什么 |
+
+## 🧩 输出示例
+
+销售谈判：
+
+```text
+[事实] 对方说预算审批要经过财务
+[风险] 还没确认最终决策人
+[推荐] 追问这次采购的成功标准
+[谈判] 降价前先换付款周期或案例授权
+```
+
+求职面试：
+
+```text
+[问题] HR 在问项目中你的真实贡献
+[考察点] 判断执行力和协作边界
+[结构] 用 STAR 讲背景、行动、结果
+[素材] 可引用简历里的转化率提升项目
+[风险] 不要泛讲团队成果，补个人动作
+```
 
 ## ❓ 常见问题
 
@@ -156,8 +208,8 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 **Q：没有声音 / 不转写？**
 > 检查 Chrome 是否授权了麦克风权限（地址栏左边的锁图标 → 网站设置 → 麦克风 → 允许）。
 
-**Q：追问建议质量不够好？**
-> 尝试切换场景模式，或使用「自定义」模式编写更具针对性的 Prompt。也可以上传脚本/资料让 AI 有更多上下文。
+**Q：追问或洞察质量不够好？**
+> 尝试切换场景模式，或使用「自定义」模式编写更具针对性的 Prompt。也可以上传脚本、客户资料、简历或 JD，让 AI 有更多上下文。
 
 **Q：可以用其他语音识别服务吗？**
 > 目前仅支持火山引擎豆包 Seed-ASR。如果你想接入其他 ASR，需要修改 `server.js` 中的 WebSocket 协议部分。
@@ -183,29 +235,30 @@ git checkout -b feature/your-feature
 
 # Chat Copilot — AI-Powered Conversation Assistant
 
-**Real-time speech recognition + AI-generated follow-up questions to keep any conversation going.**
+**Real-time speech recognition + scenario-aware AI cues for interviews, sales calls, live hosting, and training.**
 
 </div>
 
 ## What is this?
 
-**Chat Copilot** (把天聊下去) is an open-source AI conversation co-pilot. It listens to your conversation in real time, transcribes speech to text, and automatically generates smart follow-up questions — so you always know what to ask next.
+**Chat Copilot** (把天聊下去) is an open-source AI conversation co-pilot. It listens to your conversation in real time, transcribes speech to text, and generates scenario-aware cues — follow-up questions, sales insights, interview answer prompts, and post-interview reviews.
 
-Whether you're hosting a live stream, conducting an interview, running a job interview, recording a video, or teaching a class, Chat Copilot acts as your invisible assistant that keeps the dialogue flowing.
+Whether you're hosting a live stream, conducting an interview, running a job interview, taking a job interview, negotiating with a customer, recording a video, or teaching a class, Chat Copilot acts as your invisible assistant that keeps the dialogue moving.
 
 ## Features
 
 - 🗣️ **Real-time Speech-to-Text** — Powered by ByteDance's Seed-ASR 2.0 (Chinese language)
-- 💡 **AI Follow-up Suggestions** — Auto-triggered on speech pauses, or manually via `Cmd+Enter`
-- 🎭 **5 Scene Modes** — Live hosting, interviews, recruitment, video recording, and training — each with tailored prompts
+- 💡 **Scenario-Aware Cues** — Auto-triggered on speech pauses, or manually via `Cmd+Enter`
+- 🎭 **7 Scene Modes** — Live hosting, interviews, interviewer mode, candidate mode, sales negotiation, video recording, and training
 - ⚙️ **Custom Prompts** — Write your own system prompt for any scenario
-- 📁 **Script Upload** — Upload show notes or guest bios for context-aware suggestions
+- 📁 **Material Upload** — Upload show notes, guest bios, customer context, resumes, or job descriptions
+- 🧭 **Post-Interview Review** — Candidate mode can generate a question list, weak spots, and next-round prep checklist
 - 🌙 **Dark, Large-Font UI** — Designed for glancing at during live sessions
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/jianlongqiao-commits/chat-copilot.git
+git clone https://github.com/bangzhu-commit/chat-copilot.git
 cd chat-copilot
 npm install
 cp .env.example .env
@@ -229,7 +282,9 @@ Open **http://localhost:3000** in Chrome.
 |------|----------|----------|
 | 🎙️ Live Host | Streams, podcasts | Audience-perspective questions, context-aware |
 | 🎤 Interview | Journalism, content creation | Dig for details and stories, open-ended questions |
-| 👔 Recruitment | HR, hiring managers | STAR method follow-ups, quantified results |
+| 👔 Recruitment (Interviewer) | HR, hiring managers | STAR method follow-ups, quantified results |
+| 🧑‍💼 Candidate Interview | Job candidates | Detect question intent, suggest answer structure and resume-backed evidence |
+| 🤝 Sales Negotiation | Sales, business development, renewals | Facts, risks, next moves, and negotiation reminders |
 | 📹 Recording | Solo video content | Expand arguments, add examples and analogies |
 | 📚 Training | Teachers, trainers | Simulate student questions, clarify concepts |
 | ⚙️ Custom | Anything | Your prompt, your rules |

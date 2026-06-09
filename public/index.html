@@ -10,8 +10,11 @@
   <!-- ── 顶部工具栏 ─────────────────────────────────── -->
   <header class="toolbar">
     <div class="toolbar-left">
-      <h1 class="app-title">🎙️ 把天聊下去</h1>
-      <span class="app-subtitle">直播主持人 AI 副驾</span>
+      <div class="brand-mark" aria-hidden="true">聊</div>
+      <div class="brand-copy">
+        <h1 class="app-title">把天聊下去</h1>
+        <span class="app-subtitle">实时对话 AI 副驾</span>
+      </div>
     </div>
     <div class="toolbar-center">
       <div class="audio-source">
@@ -23,23 +26,28 @@
       <div class="scene-mode">
         <label for="sceneMode">场景</label>
         <select id="sceneMode" onchange="onSceneModeChange()">
-          <option value="live-host" selected>🎙️ 直播主持</option>
-          <option value="interview">🎤 访谈采访</option>
-          <option value="recruitment">👔 招聘面试</option>
-          <option value="recording">📹 口播录制</option>
-          <option value="training">📚 培训教学</option>
-          <option value="custom">⚙️ 自定义</option>
+          <option value="live-host" selected>直播主持</option>
+          <option value="interview">访谈采访</option>
+          <option value="recruitment">招聘面试（面试官）</option>
+          <option value="candidate-interview">求职面试</option>
+          <option value="sales-negotiation">销售谈判</option>
+          <option value="recording">口播录制</option>
+          <option value="training">培训教学</option>
+          <option value="custom">自定义</option>
         </select>
       </div>
       <button id="btnToggle" class="btn btn-primary" onclick="toggleRecording()">
-        ▶ 开始
+        开始
       </button>
       <label class="btn btn-secondary upload-btn">
-        📁 上传脚本
+        上传资料
         <input type="file" id="fileInput" accept=".txt,.md" hidden onchange="uploadScript(this)">
       </label>
       <button class="btn btn-accent" onclick="manualTrigger()">
-        💡 手动追问
+        手动追问
+      </button>
+      <button id="btnInterviewReview" class="btn btn-secondary btn-review" onclick="generateInterviewReview()" style="display: none;">
+        面试复盘
       </button>
     </div>
     <div id="customPromptRow" class="custom-prompt-row" style="display: none;">
@@ -56,13 +64,13 @@
     <!-- 左侧：追问建议 -->
     <section class="panel panel-suggestions">
       <div class="panel-header">
-        <h2>💡 AI 追问建议</h2>
+        <h2><span id="suggestionPanelLabel" class="panel-label">Cue</span><span id="suggestionPanelTitle">AI 追问建议</span></h2>
         <span id="suggestionCount" class="badge">0</span>
       </div>
       <div id="suggestionsContainer" class="suggestions-list">
         <div class="empty-state">
-          <p>开始录音后，AI 会根据对话内容自动生成追问建议</p>
-          <p class="hint">也可以随时点击「手动追问」按钮</p>
+          <p>等待追问建议</p>
+          <p class="hint">有对话内容后可自动生成，也可手动触发</p>
         </div>
       </div>
     </section>
@@ -70,17 +78,17 @@
     <!-- 右侧：实时转写 -->
     <section class="panel panel-transcript">
       <div class="panel-header">
-        <h2>📝 实时语音转写</h2>
+        <h2><span class="panel-label">Live</span>实时语音转写</h2>
         <div class="transcript-actions">
           <span id="charCount" class="badge">0 字</span>
           <button class="btn-small" onclick="clearTranscript()">清空</button>
-          <button class="btn-small" id="btnScrollLock" onclick="toggleScrollLock()">自动滚动 ✅</button>
+          <button class="btn-small" id="btnScrollLock" onclick="toggleScrollLock()">自动滚动：开</button>
         </div>
       </div>
       <div id="transcriptContainer" class="transcript-list">
         <div class="empty-state">
-          <p>点击「开始」按钮，语音识别后的文字会显示在这里</p>
-          <p class="hint">使用豆包 Seed-ASR 2.0 语音识别大模型</p>
+          <p>等待语音输入</p>
+          <p class="hint">转写结果会实时显示在这里</p>
         </div>
       </div>
       <div id="interimText" class="interim-text"></div>
@@ -99,7 +107,7 @@
       <span id="llmStatus">LLM: 待命</span>
     </div>
     <div class="status-right">
-      <span id="elapsedTime">⏱ 00:00:00</span>
+      <span id="elapsedTime">00:00:00</span>
     </div>
   </footer>
 
