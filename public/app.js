@@ -36,6 +36,12 @@ const SCENE_UI = {
     emptyTitle: '等待回答提示',
     emptyHint: '可识别问题意图、回答结构、可用素材和风险'
   },
+  'dating': {
+    label: 'Date',
+    title: 'AI 聊天提示',
+    emptyTitle: '等待相亲聊天提示',
+    emptyHint: '可生成破冰、共鸣、追问、转场和边界提醒'
+  },
   default: {
     label: 'Cue',
     title: 'AI 追问建议',
@@ -653,11 +659,17 @@ function getTagClass(tagText) {
     '事实': 'fact',
     '风险': 'risk',
     '推荐': 'action',
+    '追问': 'action',
     '谈判': 'deal',
     '问题': 'question',
     '考察点': 'intent',
     '结构': 'structure',
-    '素材': 'material'
+    '素材': 'material',
+    '破冰': 'icebreaker',
+    '共鸣': 'empathy',
+    '自我披露': 'share',
+    '转场': 'transition',
+    '边界': 'boundary'
   };
   return map[tagText] || 'note';
 }

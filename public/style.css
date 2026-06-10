@@ -510,22 +510,27 @@ select {
 }
 
 .suggestion-card.tag-fact,
-.suggestion-card.tag-material {
+.suggestion-card.tag-material,
+.suggestion-card.tag-icebreaker {
   border-left-color: var(--accent-blue);
 }
 
-.suggestion-card.tag-risk {
+.suggestion-card.tag-risk,
+.suggestion-card.tag-boundary {
   border-left-color: var(--accent-red);
 }
 
 .suggestion-card.tag-action,
-.suggestion-card.tag-structure {
+.suggestion-card.tag-structure,
+.suggestion-card.tag-share {
   border-left-color: var(--accent-green);
 }
 
 .suggestion-card.tag-deal,
 .suggestion-card.tag-intent,
-.suggestion-card.tag-question {
+.suggestion-card.tag-question,
+.suggestion-card.tag-empathy,
+.suggestion-card.tag-transition {
   border-left-color: var(--accent-orange);
 }
 

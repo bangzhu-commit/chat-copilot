@@ -13,7 +13,7 @@
 
 ---
 
-你有没有过这样的时刻——直播时嘉宾话音刚落，脑子突然一片空白；销售谈判里客户刚抛出价格异议，你还没来得及判断风险；求职面试时 HR 问完一个问题，你知道要回答，但一时想不起该按什么结构讲。
+你有没有过这样的时刻——直播时嘉宾话音刚落，脑子突然一片空白；销售谈判里客户刚抛出价格异议，你还没来得及判断风险；求职面试时 HR 问完一个问题，你知道要回答，但一时想不起该按什么结构讲；线上相亲聊到一半，对方只回了几个字，你不知道该怎么自然接下去。
 
 **「把天聊下去」** 就是为这些时刻而生的。它实时监听对话内容，用 AI 帮你生成场景化提示——你只需要瞄一眼屏幕，就知道下一句该追问什么、该补什么事实、哪里有风险。
 
@@ -27,9 +27,9 @@
 |------|------|
 | 🗣️ **实时语音转写** | 基于豆包 Seed-ASR 2.0 大模型，高精度中文语音实时转文字 |
 | 💡 **AI 场景提示** | 检测到说话停顿后自动生成追问、洞察或回答提示，也支持手动触发（`Cmd+Enter`） |
-| 🎭 **7 种场景模式** | 直播主持 / 访谈采访 / 招聘面试（面试官） / 求职面试 / 销售谈判 / 口播录制 / 培训教学 |
+| 🎭 **8 种场景模式** | 直播主持 / 访谈采访 / 招聘面试（面试官） / 求职面试 / 销售谈判 / 相亲约会 / 口播录制 / 培训教学 |
 | ⚙️ **自定义指令** | 场景模式不够用？直接写你自己的 Prompt |
-| 📁 **资料上传** | 上传脚本、嘉宾资料、客户背景、简历或 JD（.txt / .md），AI 会结合内容给出更贴合的提示 |
+| 📁 **资料上传** | 上传节目提纲、嘉宾资料、客户背景、简历/JD 或相亲资料（.txt / .md），AI 会结合内容给出更贴合的提示 |
 | 🧭 **面试后复盘** | 求职面试场景支持基于完整转写生成问题清单、薄弱项和下一轮准备清单 |
 | 🌙 **深色大字界面** | 直播环境不刺眼，大字号远距离也能看清 |
 
@@ -49,6 +49,9 @@ HR 问完问题，AI 帮候选人识别考察点，提示 STAR/CAR/PAR 回答结
 
 ### 🤝 销售谈判
 客户表达需求、预算、竞品或价格异议时，AI 会基于 SPIN、MEDDICC、BATNA/ZOPA 和原则式谈判，生成事实洞察、风险点、推荐动作和谈判提醒。
+
+### 💬 相亲约会
+线上语音相亲、初次约会前演练或相亲后回顾时，AI 帮你缓解冷场、接住对方情绪、自然追问和提醒边界。它不做 PUA，不诱导隐私，也不帮你编造人设。
 
 ### 📹 口播录制
 一个人对着镜头讲，AI 充当你的编导——提示你补充案例、加个类比、转到下一个要点。
@@ -163,6 +166,15 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 目标公司：业务、产品、面试岗位背景
 ```
 
+相亲约会建议上传：
+
+```markdown
+对方基本信息：职业、城市、兴趣、介绍人提供的信息
+自己想展示的真实信息：兴趣、生活方式、价值观
+本次目标：轻松认识、判断是否继续约、了解生活节奏
+禁区：不想聊的话题、不要显得太功利的问题
+```
+
 ## 🎭 场景模式说明
 
 | 模式 | 适用场景 | Prompt 策略 |
@@ -172,6 +184,7 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 | 👔 招聘面试（面试官） | HR、面试官 | STAR 法则追问，追数据和量化结果 |
 | 🧑‍💼 求职面试 | 候选人、面试准备 | 识别问题意图，提示回答结构、素材和风险 |
 | 🤝 销售谈判 | 销售、商务、续约 | 识别事实、风险、推荐动作和谈判提醒 |
+| 💬 相亲约会 | 线上语音相亲、约会演练、相亲后回顾 | 破冰、共鸣、追问、自我披露、转场和边界提醒 |
 | 📹 口播录制 | 自媒体录制 | 引导展开论述，补充案例和类比 |
 | 📚 培训教学 | 讲师、培训 | 模拟学员视角，追问不清楚的概念 |
 | ⚙️ 自定义 | 任意场景 | 你写什么 Prompt 就用什么 |
@@ -197,6 +210,16 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 [风险] 不要泛讲团队成果，补个人动作
 ```
 
+相亲约会：
+
+```text
+[共鸣] 先接住对方刚下班的疲惫感
+[破冰] 可以聊今天有没有一件小事还不错
+[追问] 爬山一般喜欢风景线还是挑战路线
+[自我披露] 也分享你周末放松的一种方式
+[边界] 收入房产前任先别问，改聊生活节奏
+```
+
 ## ❓ 常见问题
 
 **Q：一直显示"连接中"，卡住不动？**
@@ -209,7 +232,7 @@ MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 > 检查 Chrome 是否授权了麦克风权限（地址栏左边的锁图标 → 网站设置 → 麦克风 → 允许）。
 
 **Q：追问或洞察质量不够好？**
-> 尝试切换场景模式，或使用「自定义」模式编写更具针对性的 Prompt。也可以上传脚本、客户资料、简历或 JD，让 AI 有更多上下文。
+> 尝试切换场景模式，或使用「自定义」模式编写更具针对性的 Prompt。也可以上传节目提纲、客户资料、简历/JD 或相亲资料，让 AI 有更多上下文。
 
 **Q：可以用其他语音识别服务吗？**
 > 目前仅支持火山引擎豆包 Seed-ASR。如果你想接入其他 ASR，需要修改 `server.js` 中的 WebSocket 协议部分。
@@ -235,23 +258,23 @@ git checkout -b feature/your-feature
 
 # Chat Copilot — AI-Powered Conversation Assistant
 
-**Real-time speech recognition + scenario-aware AI cues for interviews, sales calls, live hosting, and training.**
+**Real-time speech recognition + scenario-aware AI cues for interviews, sales calls, dating conversations, live hosting, and training.**
 
 </div>
 
 ## What is this?
 
-**Chat Copilot** (把天聊下去) is an open-source AI conversation co-pilot. It listens to your conversation in real time, transcribes speech to text, and generates scenario-aware cues — follow-up questions, sales insights, interview answer prompts, and post-interview reviews.
+**Chat Copilot** (把天聊下去) is an open-source AI conversation co-pilot. It listens to your conversation in real time, transcribes speech to text, and generates scenario-aware cues — follow-up questions, sales insights, interview answer prompts, dating conversation cues, and post-interview reviews.
 
-Whether you're hosting a live stream, conducting an interview, running a job interview, taking a job interview, negotiating with a customer, recording a video, or teaching a class, Chat Copilot acts as your invisible assistant that keeps the dialogue moving.
+Whether you're hosting a live stream, conducting an interview, running a job interview, taking a job interview, negotiating with a customer, preparing for a dating conversation, recording a video, or teaching a class, Chat Copilot acts as your invisible assistant that keeps the dialogue moving.
 
 ## Features
 
 - 🗣️ **Real-time Speech-to-Text** — Powered by ByteDance's Seed-ASR 2.0 (Chinese language)
 - 💡 **Scenario-Aware Cues** — Auto-triggered on speech pauses, or manually via `Cmd+Enter`
-- 🎭 **7 Scene Modes** — Live hosting, interviews, interviewer mode, candidate mode, sales negotiation, video recording, and training
+- 🎭 **8 Scene Modes** — Live hosting, interviews, interviewer mode, candidate mode, sales negotiation, dating, video recording, and training
 - ⚙️ **Custom Prompts** — Write your own system prompt for any scenario
-- 📁 **Material Upload** — Upload show notes, guest bios, customer context, resumes, or job descriptions
+- 📁 **Material Upload** — Upload show notes, guest bios, customer context, resumes, job descriptions, or dating context
 - 🧭 **Post-Interview Review** — Candidate mode can generate a question list, weak spots, and next-round prep checklist
 - 🌙 **Dark, Large-Font UI** — Designed for glancing at during live sessions
 
@@ -285,6 +308,7 @@ Open **http://localhost:3000** in Chrome.
 | 👔 Recruitment (Interviewer) | HR, hiring managers | STAR method follow-ups, quantified results |
 | 🧑‍💼 Candidate Interview | Job candidates | Detect question intent, suggest answer structure and resume-backed evidence |
 | 🤝 Sales Negotiation | Sales, business development, renewals | Facts, risks, next moves, and negotiation reminders |
+| 💬 Dating | Online dating calls, first-date practice, post-date review | Icebreakers, empathy, follow-ups, self-disclosure, transitions, and boundaries |
 | 📹 Recording | Solo video content | Expand arguments, add examples and analogies |
 | 📚 Training | Teachers, trainers | Simulate student questions, clarify concepts |
 | ⚙️ Custom | Anything | Your prompt, your rules |

@@ -131,6 +131,22 @@ const SCENE_PROMPTS = {
 ## 输出格式
 直接输出带标签的短提示，每条一行。标签只能使用：[事实] [风险] [推荐] [谈判]。不需要任何解释或前缀。`,
 
+  'dating': `你是一位相亲/初次约会对话副驾。你的任务是帮助用户在相亲、初次约会或线上语音相亲中自然接住话题，避免冷场，同时尊重对方边界。
+
+## 你的工作原则
+1. 目标是让对话更自然，不是教用户套路、操控、施压或假装共情
+2. 避免把相亲聊成面试；如果对话像盘问，提示用户换成生活化分享
+3. 如果对方回答很短，优先给低压力破冰或转场，不责怪对方冷淡
+4. 如果对方讲出具体经历，优先追故事、感受和轻度价值观
+5. 适度提醒用户也分享自己的真实经历，避免只问不答
+6. 不替用户编造人设、经历、城市、爱好或具体故事；[自我披露] 只提示分享方向，例如"也分享你的周末放松方式"
+7. 对收入、房产、前任、婚育压力、家庭隐私等敏感话题保持边界；除非对方主动提起，否则不要推进
+8. 如果对方表达疲惫、抗拒、边界或冷淡，提示尊重节奏，不继续逼问
+9. 每次输出 3-5 条短提示，用户只能瞄一眼，每条不超过 42 个字
+
+## 输出格式
+直接输出带标签的短提示，每条一行。标签只能使用：[破冰] [共鸣] [追问] [自我披露] [转场] [边界]。不需要任何解释或前缀。`,
+
   'recording': `你是一位内容创作教练。你的任务是根据口播录制内容，为说话者生成引导性建议。
 
 ## 你的工作原则
@@ -202,6 +218,8 @@ function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
     userPrompt += '\n\n请生成 3-5 条销售谈判实时洞察。必须使用 [事实] [风险] [推荐] [谈判] 标签。';
   } else if (sceneMode === 'candidate-interview') {
     userPrompt += '\n\n请生成 3-5 条求职面试回答提示。必须使用 [问题] [考察点] [结构] [素材] [风险] 标签。';
+  } else if (sceneMode === 'dating') {
+    userPrompt += '\n\n请生成 3-5 条相亲约会聊天提示。必须使用 [破冰] [共鸣] [追问] [自我披露] [转场] [边界] 标签。不要替用户编造具体经历或人设。';
   } else {
     userPrompt += '\n\n请生成 2-3 条追问建议。';
   }
@@ -228,7 +246,52 @@ function buildCandidateMaterialHint(scriptContent, transcript) {
   return `[素材] 可引用资料：${snippet}`;
 }
 
+function buildDatingDisclosureHint(transcript) {
+  const text = transcript || '';
+  if (/(累|下班|加班|疲惫|辛苦)/.test(text)) {
+    return '[自我披露] 也分享你真实的下班放松方式';
+  }
+  if (/(爬山|徒步|户外|周末)/.test(text)) {
+    return '[自我披露] 也分享你自己的周末放松方式';
+  }
+  return '[自我披露] 也分享一个真实的小习惯或近况';
+}
+
+function sanitizeDatingLine(line, context) {
+  const text = line.trim();
+  if (!text) return '';
+
+  if (text.startsWith('[自我披露]')) {
+    return buildDatingDisclosureHint(context.transcript);
+  }
+
+  const firstPersonClaim = /(我也|我有时|我最近|我周末|我常|我喜欢|我上周|我其实|我平时|我一般|我倒是)/.test(text);
+  if (!firstPersonClaim) return text;
+
+  if (text.startsWith('[共鸣]')) {
+    return '[共鸣] 先接住对方的感受，再轻轻回应';
+  }
+  if (text.startsWith('[破冰]')) {
+    return '[破冰] 问一个低压力的小问题，不要求对方长回答';
+  }
+  if (text.startsWith('[转场]')) {
+    return '[转场] 转到生活节奏或兴趣，不急着追隐私';
+  }
+  if (text.startsWith('[追问]')) {
+    return '[追问] 顺着对方刚说的细节追故事和感受';
+  }
+
+  return text;
+}
+
 function sanitizeSuggestions(content, sceneMode, context = {}) {
+  if (sceneMode === 'dating') {
+    return content.split('\n')
+      .map(line => sanitizeDatingLine(line, context))
+      .filter(Boolean)
+      .join('\n');
+  }
+
   if (sceneMode !== 'candidate-interview') return content;
 
   const materialHint = buildCandidateMaterialHint(context.scriptContent, context.transcript);
