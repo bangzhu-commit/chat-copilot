@@ -630,7 +630,9 @@ wss.on('connection', (clientWs) => {
           enable_punc: true,
           enable_itn: true,
           enable_ddc: false,
-          result_type: 'single'
+          result_type: 'single',
+          show_utterances: true,
+          enable_speaker_info: true
         }
       };
 
@@ -674,11 +676,13 @@ wss.on('connection', (clientWs) => {
           const text = result.payload_msg.result?.text || '';
           const definite = result.payload_msg.result?.definite !== undefined
             ? result.payload_msg.result.definite : true;
+          const utterances = result.payload_msg.result?.utterances || [];
 
           clientWs.send(JSON.stringify({
             type: 'asr_result',
             text: text,
-            definite: definite
+            definite: definite,
+            utterances: utterances
           }));
         }
       } else if (parsed.type === 'ack') {

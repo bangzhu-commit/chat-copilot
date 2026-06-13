@@ -616,6 +616,29 @@ select {
   vertical-align: 1px;
 }
 
+.speaker-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-right: 9px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(114, 167, 255, 0.12);
+  border: 1px solid rgba(114, 167, 255, 0.22);
+  color: var(--accent-blue);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: 1px;
+}
+
+.speaker-chip[hidden] {
+  display: none;
+}
+
+.transcript-content {
+  overflow-wrap: anywhere;
+}
+
 .interim-text {
   display: none;
   min-height: 0;

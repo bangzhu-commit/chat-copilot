@@ -19,6 +19,8 @@ let lastFinalText = '';      // 上一次 definite 文本（用于去重）
 let fullTranscript = '';         // 全量转写文本
 let newTextSinceLastTrigger = ''; // 上次触发后的新增文本
 let suggestionCount = 0;
+let speakerOrder = [];
+let speakerLabelMap = {};
 
 // 上传资料内容
 let scriptContent = '';
@@ -227,8 +229,10 @@ function handleAsrMessage(msg) {
 function processAsrResult(msg) {
   const text = msg.text || '';
   const definite = msg.definite;
+  const turns = extractAsrTurns(msg, text);
+  const finalKey = text || turns.map(turn => `${turn.speakerId}:${turn.text}`).join('|');
 
-  if (!text) return;
+  if (!finalKey) return;
 
   if (definite) {
     // 最终结果 → 添加到转写区
@@ -236,19 +240,82 @@ function processAsrResult(msg) {
     $interimText.classList.remove('active');
 
     // 去重：如果和上一次完全一样则跳过
-    if (text !== lastFinalText) {
-      addTranscriptLine(text);
-      fullTranscript += text;
-      newTextSinceLastTrigger += text;
+    if (finalKey !== lastFinalText) {
+      const promptLines = turns.map(turn => {
+        addTranscriptLine(turn.text, turn.speakerId);
+        return formatTranscriptTurn(turn.text, turn.speakerId);
+      }).join('');
+
+      fullTranscript += promptLines;
+      newTextSinceLastTrigger += promptLines;
       updateCharCount();
       resetSilenceTimer();
-      lastFinalText = text;
+      lastFinalText = finalKey;
     }
   } else {
     // 中间结果 → 显示为临时文本
     $interimText.textContent = text;
     $interimText.classList.add('active');
   }
+}
+
+function extractAsrTurns(msg, fallbackText) {
+  const utterances = Array.isArray(msg.utterances) ? msg.utterances : [];
+  const turns = utterances
+    .map(utterance => ({
+      text: getUtteranceText(utterance),
+      speakerId: getUtteranceSpeakerId(utterance)
+    }))
+    .filter(turn => turn.text.length > 0);
+
+  if (turns.length > 0) return turns;
+  return fallbackText ? [{ text: fallbackText, speakerId: '' }] : [];
+}
+
+function getUtteranceText(utterance) {
+  if (!utterance || typeof utterance !== 'object') return '';
+  if (typeof utterance.text === 'string' && utterance.text.trim()) {
+    return utterance.text.trim();
+  }
+  if (Array.isArray(utterance.words)) {
+    return utterance.words
+      .map(word => word.text || word.word || '')
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
+function getUtteranceSpeakerId(utterance) {
+  if (!utterance || typeof utterance !== 'object') return '';
+  const additions = utterance.additions || {};
+  const candidates = [
+    utterance.speaker,
+    utterance.speaker_id,
+    utterance.speakerId,
+    utterance.speaker_label,
+    additions.speaker,
+    additions.speaker_id,
+    additions.speakerId,
+    additions.speaker_label
+  ];
+
+  const speaker = candidates.find(value => value !== undefined && value !== null && value !== '');
+  return speaker !== undefined ? `speaker-${speaker}` : '';
+}
+
+function getSpeakerLabel(speakerId) {
+  if (!speakerId) return '';
+  if (!speakerLabelMap[speakerId]) {
+    speakerOrder.push(speakerId);
+    speakerLabelMap[speakerId] = `说话人 ${speakerOrder.length}`;
+  }
+  return speakerLabelMap[speakerId];
+}
+
+function formatTranscriptTurn(text, speakerId) {
+  const speakerLabel = getSpeakerLabel(speakerId);
+  return speakerLabel ? `${speakerLabel}：${text}\n` : `${text}\n`;
 }
 
 // ── 音频采集 ──────────────────────────────────────────────
@@ -398,7 +465,7 @@ function stopRecording() {
 }
 
 // ── 转写文本管理 ──────────────────────────────────────────
-function addTranscriptLine(text) {
+function addTranscriptLine(text, speakerId = '') {
   const emptyState = $transcriptContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
@@ -409,9 +476,18 @@ function addTranscriptLine(text) {
   ts.className = 'timestamp';
   ts.textContent = formatTime(new Date());
 
-  const content = document.createTextNode(text);
+  const speakerLabel = getSpeakerLabel(speakerId);
+  const speaker = document.createElement('span');
+  speaker.className = 'speaker-chip';
+  speaker.textContent = speakerLabel;
+  speaker.hidden = !speakerLabel;
+
+  const content = document.createElement('span');
+  content.className = 'transcript-content';
+  content.textContent = text;
 
   line.appendChild(ts);
+  line.appendChild(speaker);
   line.appendChild(content);
   $transcriptContainer.appendChild(line);
 
@@ -426,6 +502,8 @@ function clearTranscript() {
   fullTranscript = '';
   newTextSinceLastTrigger = '';
   lastFinalText = '';
+  speakerOrder = [];
+  speakerLabelMap = {};
   updateCharCount();
 }
 
