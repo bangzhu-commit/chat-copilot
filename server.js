@@ -142,7 +142,8 @@ const SCENE_PROMPTS = {
 6. 不替用户编造人设、经历、城市、爱好或具体故事；[自我披露] 只提示分享方向，例如"也分享你的周末放松方式"
 7. 对收入、房产、前任、婚育压力、家庭隐私等敏感话题保持边界；除非对方主动提起，否则不要推进
 8. 如果对方表达疲惫、抗拒、边界或冷淡，提示尊重节奏，不继续逼问
-9. 每次输出 3-5 条短提示，用户只能瞄一眼，每条不超过 42 个字
+9. 如果对方说累、刚下班或最近很忙，不追问具体工作、项目、压力来源，优先低压力共鸣或生活化转场
+10. 每次输出 3-5 条短提示，用户只能瞄一眼，每条不超过 42 个字
 
 ## 输出格式
 直接输出带标签的短提示，每条一行。标签只能使用：[破冰] [共鸣] [追问] [自我披露] [转场] [边界]。不需要任何解释或前缀。`,
@@ -207,11 +208,26 @@ function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   return systemPrompt;
 }
 
+function getSpeakerGuidance(sceneMode) {
+  const guidance = {
+    'live-host': '对话里如有"嘉宾/主持人"前缀，优先围绕嘉宾最近的表达生成追问；主持人的串场只作为上下文。',
+    'interview': '对话里如有"受访者/采访者"前缀，优先追受访者的细节、故事和判断；不要把采访者的问题当成事实来源。',
+    'recruitment': '对话里如有"候选人/面试官"前缀，重点分析候选人回答里的 STAR 缺口；面试官的话只用于理解问题。',
+    'candidate-interview': '对话里如有"面试官/候选人"前缀，只把面试官的话识别为问题；候选人的话用于判断已答内容和可补充点。',
+    'sales-negotiation': '对话里如有"客户/我方"前缀，只有客户明确说出的内容才能标为[事实]；我方表达只用于判断推进和承诺风险。',
+    'dating': '对话里如有"对方/自己"前缀，优先围绕对方表达给破冰、共鸣和追问；如果自己连续发问，提醒自我披露和边界。',
+    'training': '对话里如有"讲师/学员"前缀，讲师内容用于判断知识点，学员发问用于判断困惑点。',
+    'recording': '对话里如有角色前缀，优先辅助主要讲述者补案例、类比、结构和收束。'
+  };
+  return guidance[sceneMode] || '如果对话内容包含角色或说话人前缀，请利用这些前缀判断谁在表达观点、谁在提问。';
+}
+
 function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
   let userPrompt = '';
   if (previousSummary) {
     userPrompt += `## 之前的对话摘要\n${previousSummary}\n\n`;
   }
+  userPrompt += `## 发言人使用规则\n${getSpeakerGuidance(sceneMode)}\n\n`;
   userPrompt += `## 最近的对话内容\n${transcript.slice(-3000)}`;
 
   if (sceneMode === 'sales-negotiation') {
@@ -219,7 +235,7 @@ function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
   } else if (sceneMode === 'candidate-interview') {
     userPrompt += '\n\n请生成 3-5 条求职面试回答提示。必须使用 [问题] [考察点] [结构] [素材] [风险] 标签。';
   } else if (sceneMode === 'dating') {
-    userPrompt += '\n\n请生成 3-5 条相亲约会聊天提示。必须使用 [破冰] [共鸣] [追问] [自我披露] [转场] [边界] 标签。不要替用户编造具体经历或人设。';
+    userPrompt += '\n\n请生成 3-5 条相亲约会聊天提示。必须使用 [破冰] [共鸣] [追问] [自我披露] [转场] [边界] 标签。不要替用户编造具体经历或人设。对方表达疲惫或刚下班时，不要继续追问具体工作细节。';
   } else {
     userPrompt += '\n\n请生成 2-3 条追问建议。';
   }
@@ -260,6 +276,12 @@ function buildDatingDisclosureHint(transcript) {
 function sanitizeDatingLine(line, context) {
   const text = line.trim();
   if (!text) return '';
+
+  const tiredContext = /(累|下班|加班|疲惫|辛苦|最近还挺忙|最近很忙)/.test(context.transcript || '');
+  const workProbe = /(工作|项目|加班|忙什么|为什么忙|压力|领导|老板|同事|客户)/.test(text);
+  if (tiredContext && text.startsWith('[追问]') && workProbe) {
+    return '[转场] 先不追问工作细节，换个轻松话题';
+  }
 
   if (text.startsWith('[自我披露]')) {
     return buildDatingDisclosureHint(context.transcript);

@@ -26,7 +26,7 @@
 | 功能 | 说明 |
 |------|------|
 | 🗣️ **实时语音转写** | 基于豆包 Seed-ASR 2.0 大模型，高精度中文语音实时转文字 |
-| 🧑‍🤝‍🧑 **发言人标签** | 开启火山 ASR 分句和说话人信息后，右侧转写可显示「说话人 1 / 说话人 2」；若模型未返回 speaker 信息则自动回退 |
+| 🧑‍🤝‍🧑 **发言人标签** | 开启火山 ASR 分句和说话人信息后，右侧转写可显示并映射「嘉宾 / 主持人」「客户 / 我方」等角色；若模型未返回 speaker 信息则自动回退 |
 | 💡 **AI 场景提示** | 检测到说话停顿后自动生成追问、洞察或回答提示，也支持手动触发（`Cmd+Enter`） |
 | 🎭 **8 种场景模式** | 直播主持 / 访谈采访 / 招聘面试（面试官） / 求职面试 / 销售谈判 / 相亲约会 / 口播录制 / 培训教学 |
 | ⚙️ **自定义指令** | 场景模式不够用？直接写你自己的 Prompt |
@@ -106,7 +106,7 @@ npm start
 
 - **前端**：原生 HTML/CSS/JS，AudioWorklet 采集 16kHz PCM 音频流
 - **后端**：Node.js + Express + WebSocket，负责 ASR 协议转换和 LLM 调用
-- **语音识别**：火山引擎豆包 Seed-ASR 2.0 大模型，服务端实时转写；请求开启分句和说话人信息
+- **语音识别**：火山引擎豆包 Seed-ASR 2.0 大模型，服务端实时转写；请求开启分句和说话人信息，并在前端做重复过滤和短片段合并
 - **AI 场景提示**：OpenRouter（兼容任何 OpenAI 格式 API），默认使用 DeepSeek
 
 ## ⚙️ 配置说明
@@ -272,7 +272,7 @@ Whether you're hosting a live stream, conducting an interview, running a job int
 ## Features
 
 - 🗣️ **Real-time Speech-to-Text** — Powered by ByteDance's Seed-ASR 2.0 (Chinese language)
-- 🧑‍🤝‍🧑 **Speaker Labels** — Requests ASR utterances and speaker info, displaying speaker labels when the model returns them
+- 🧑‍🤝‍🧑 **Speaker Labels** — Requests ASR utterances and speaker info, maps speakers to scene roles, and filters duplicate fragments
 - 💡 **Scenario-Aware Cues** — Auto-triggered on speech pauses, or manually via `Cmd+Enter`
 - 🎭 **8 Scene Modes** — Live hosting, interviews, interviewer mode, candidate mode, sales negotiation, dating, video recording, and training
 - ⚙️ **Custom Prompts** — Write your own system prompt for any scenario

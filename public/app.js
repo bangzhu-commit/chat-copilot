@@ -21,6 +21,10 @@ let newTextSinceLastTrigger = ''; // 上次触发后的新增文本
 let suggestionCount = 0;
 let speakerOrder = [];
 let speakerLabelMap = {};
+let speakerRoleMap = {};
+let transcriptTurns = [];
+let recentTurnKeys = new Map();
+let turnCounter = 0;
 
 // 上传资料内容
 let scriptContent = '';
@@ -52,6 +56,18 @@ const SCENE_UI = {
   }
 };
 
+const SCENE_ROLE_PRESETS = {
+  'live-host': ['嘉宾', '主持人'],
+  'interview': ['受访者', '采访者'],
+  'recruitment': ['候选人', '面试官'],
+  'candidate-interview': ['面试官', '候选人'],
+  'sales-negotiation': ['客户', '我方'],
+  'dating': ['对方', '自己'],
+  'recording': ['讲述者', '协作者'],
+  'training': ['讲师', '学员'],
+  default: ['说话人 A', '说话人 B']
+};
+
 // 配置（从后端加载）
 let appConfig = {
   silenceThreshold: 3000,
@@ -79,6 +95,7 @@ const $suggestionCount = document.getElementById('suggestionCount');
 const $suggestionPanelLabel = document.getElementById('suggestionPanelLabel');
 const $suggestionPanelTitle = document.getElementById('suggestionPanelTitle');
 const $transcriptContainer = document.getElementById('transcriptContainer');
+const $speakerRoleControls = document.getElementById('speakerRoleControls');
 const $interimText = document.getElementById('interimText');
 const $charCount = document.getElementById('charCount');
 const $btnScrollLock = document.getElementById('btnScrollLock');
@@ -118,6 +135,9 @@ function onSceneModeChange() {
   $suggestionPanelLabel.textContent = ui.label;
   $suggestionPanelTitle.textContent = ui.title;
   $btnInterviewReview.style.display = mode === 'candidate-interview' ? '' : 'none';
+  syncSpeakerRolesWithScene();
+  updateSpeakerRoleControls();
+  refreshTranscriptSpeakerLabels();
 
   const emptyState = $suggestionsContainer.querySelector('.empty-state');
   if (emptyState) {
@@ -229,8 +249,8 @@ function handleAsrMessage(msg) {
 function processAsrResult(msg) {
   const text = msg.text || '';
   const definite = msg.definite;
-  const turns = extractAsrTurns(msg, text);
-  const finalKey = text || turns.map(turn => `${turn.speakerId}:${turn.text}`).join('|');
+  const incomingTurns = extractAsrTurns(msg, text);
+  const finalKey = text || incomingTurns.map(turn => `${turn.speakerId}:${turn.text}`).join('|');
 
   if (!finalKey) return;
 
@@ -241,15 +261,10 @@ function processAsrResult(msg) {
 
     // 去重：如果和上一次完全一样则跳过
     if (finalKey !== lastFinalText) {
-      const promptLines = turns.map(turn => {
-        addTranscriptLine(turn.text, turn.speakerId);
-        return formatTranscriptTurn(turn.text, turn.speakerId);
-      }).join('');
-
-      fullTranscript += promptLines;
-      newTextSinceLastTrigger += promptLines;
-      updateCharCount();
-      resetSilenceTimer();
+      const changed = commitTranscriptTurns(incomingTurns);
+      if (changed) {
+        resetSilenceTimer();
+      }
       lastFinalText = finalKey;
     }
   } else {
@@ -264,12 +279,14 @@ function extractAsrTurns(msg, fallbackText) {
   const turns = utterances
     .map(utterance => ({
       text: getUtteranceText(utterance),
-      speakerId: getUtteranceSpeakerId(utterance)
+      speakerId: getUtteranceSpeakerId(utterance),
+      startMs: getUtteranceTime(utterance, ['start_time', 'startTime', 'start', 'begin_time', 'beginTime']),
+      endMs: getUtteranceTime(utterance, ['end_time', 'endTime', 'end', 'stop_time', 'stopTime'])
     }))
     .filter(turn => turn.text.length > 0);
 
   if (turns.length > 0) return turns;
-  return fallbackText ? [{ text: fallbackText, speakerId: '' }] : [];
+  return fallbackText ? [{ text: fallbackText, speakerId: '', startMs: null, endMs: null }] : [];
 }
 
 function getUtteranceText(utterance) {
@@ -304,18 +321,270 @@ function getUtteranceSpeakerId(utterance) {
   return speaker !== undefined ? `speaker-${speaker}` : '';
 }
 
+function getUtteranceTime(utterance, keys) {
+  const additions = utterance?.additions || {};
+  for (const key of keys) {
+    const value = utterance?.[key] ?? additions[key];
+    if (value === undefined || value === null || value === '') continue;
+    const num = Number(value);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+
+function commitTranscriptTurns(rawTurns) {
+  let changed = false;
+  let triggerText = '';
+  rawTurns
+    .map(normalizeIncomingTurn)
+    .filter(Boolean)
+    .forEach(turn => {
+      if (isFillerTurn(turn.text)) return;
+      if (isRecentDuplicate(turn)) return;
+
+      const mergeTarget = findMergeTarget(turn);
+      if (mergeTarget) {
+        mergeTarget.text = mergeTurnText(mergeTarget.text, turn.text);
+        mergeTarget.endMs = turn.endMs || mergeTarget.endMs;
+        updateTranscriptLine(mergeTarget);
+        triggerText += formatPromptTranscriptTurn({ ...turn, speakerId: mergeTarget.speakerId });
+      } else {
+        addCommittedTurn(turn);
+        triggerText += formatPromptTranscriptTurn(turn);
+      }
+
+      rememberTurn(turn);
+      changed = true;
+    });
+
+  if (changed) {
+    rebuildTranscriptState();
+    newTextSinceLastTrigger += triggerText;
+    updateCharCount();
+  }
+  return changed;
+}
+
+function normalizeIncomingTurn(turn) {
+  const text = normalizeTranscriptText(turn.text);
+  if (!text) return null;
+  return {
+    id: `turn-${++turnCounter}`,
+    text,
+    speakerId: turn.speakerId || '',
+    startMs: turn.startMs,
+    endMs: turn.endMs,
+    receivedAt: Date.now(),
+    element: null
+  };
+}
+
+function normalizeTranscriptText(text) {
+  return (text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([，。！？；：、,.!?;:])/g, '$1')
+    .trim();
+}
+
+function normalizeDuplicateText(text) {
+  return normalizeTranscriptText(text).replace(/[，。！？；：、,.!?;:\s"“”'‘’]/g, '');
+}
+
+function isFillerTurn(text) {
+  return /^(嗯+|啊+|哦+|呃+|额+)$/i.test(text.trim());
+}
+
+function isRecentDuplicate(turn) {
+  const key = buildTurnKey(turn);
+  const now = Date.now();
+  const lastSeen = recentTurnKeys.get(key);
+  if (!lastSeen) return false;
+  const duplicateWindow = turn.startMs !== null && turn.startMs !== undefined
+    ? 90000
+    : normalizeDuplicateText(turn.text).length >= 10 ? 90000 : 10000;
+  return now - lastSeen < duplicateWindow;
+}
+
+function buildTurnKey(turn) {
+  const text = normalizeDuplicateText(turn.text);
+  if (turn.startMs !== null && turn.startMs !== undefined) {
+    return `${turn.speakerId}|${text}|${Math.round(Number(turn.startMs) / 500)}`;
+  }
+  return `${turn.speakerId}|${text}`;
+}
+
+function rememberTurn(turn) {
+  recentTurnKeys.set(buildTurnKey(turn), Date.now());
+  if (recentTurnKeys.size > 220) {
+    const staleKeys = [...recentTurnKeys.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .slice(0, 60)
+      .map(([key]) => key);
+    staleKeys.forEach(key => recentTurnKeys.delete(key));
+  }
+}
+
+function findMergeTarget(turn) {
+  const fragmentType = getFragmentType(turn.text);
+  if (!fragmentType) return null;
+  for (let i = transcriptTurns.length - 1; i >= 0; i--) {
+    const candidate = transcriptTurns[i];
+    if (candidate.speakerId !== turn.speakerId) continue;
+    if (canMergeByTime(candidate, turn) || (fragmentType === 'continuation' && canMergeByReceiveTime(candidate, turn))) {
+      return candidate;
+    }
+    return null;
+  }
+  return null;
+}
+
+function getFragmentType(text) {
+  const compact = normalizeDuplicateText(text);
+  if (/^[的地得了着过们及和与或、，。！？；：]/.test(text)) return 'continuation';
+  if (compact.length <= 8) return 'short';
+  return '';
+}
+
+function canMergeByTime(previous, next) {
+  if (previous.endMs === null || previous.endMs === undefined || next.startMs === null || next.startMs === undefined) return false;
+  return Math.abs(Number(next.startMs) - Number(previous.endMs)) <= 2500;
+}
+
+function canMergeByReceiveTime(previous, next) {
+  return Math.abs(Number(next.receivedAt || 0) - Number(previous.receivedAt || 0)) <= 3500;
+}
+
+function mergeTurnText(previous, next) {
+  const cleanedNext = normalizeTranscriptText(next);
+  if (!cleanedNext) return previous;
+  if (/^[的地得了着过们及和与或]/.test(cleanedNext)) {
+    return previous.replace(/[，。！？；：、,.!?;:]$/, '') + cleanedNext;
+  }
+  return `${previous}${cleanedNext}`;
+}
+
+function addCommittedTurn(turn) {
+  getSpeakerLabel(turn.speakerId);
+  ensureSpeakerRole(turn.speakerId);
+  transcriptTurns.push(turn);
+  turn.element = renderTranscriptLine(turn);
+  updateSpeakerRoleControls();
+}
+
+function rebuildTranscriptState() {
+  fullTranscript = transcriptTurns.map(formatPromptTranscriptTurn).join('');
+}
+
 function getSpeakerLabel(speakerId) {
   if (!speakerId) return '';
   if (!speakerLabelMap[speakerId]) {
     speakerOrder.push(speakerId);
     speakerLabelMap[speakerId] = `说话人 ${speakerOrder.length}`;
+    ensureSpeakerRole(speakerId);
   }
   return speakerLabelMap[speakerId];
 }
 
-function formatTranscriptTurn(text, speakerId) {
-  const speakerLabel = getSpeakerLabel(speakerId);
-  return speakerLabel ? `${speakerLabel}：${text}\n` : `${text}\n`;
+function getSpeakerDisplayName(speakerId) {
+  const role = speakerRoleMap[speakerId];
+  return role || getSpeakerLabel(speakerId);
+}
+
+function formatPromptTranscriptTurn(turn) {
+  const speakerLabel = getSpeakerLabel(turn.speakerId);
+  const role = speakerRoleMap[turn.speakerId];
+  if (role && speakerLabel) return `${role}（${speakerLabel}）：${turn.text}\n`;
+  if (role) return `${role}：${turn.text}\n`;
+  if (speakerLabel) return `${speakerLabel}：${turn.text}\n`;
+  return `${turn.text}\n`;
+}
+
+function ensureSpeakerRole(speakerId) {
+  if (!speakerId || speakerRoleMap[speakerId]) return;
+  const roles = getSceneRoles();
+  const index = speakerOrder.indexOf(speakerId);
+  speakerRoleMap[speakerId] = roles[index] || '';
+}
+
+function getSceneRoles() {
+  return SCENE_ROLE_PRESETS[$sceneMode.value] || SCENE_ROLE_PRESETS.default;
+}
+
+function syncSpeakerRolesWithScene() {
+  const roles = getSceneRoles();
+  speakerOrder.forEach((speakerId, index) => {
+    const currentRole = speakerRoleMap[speakerId];
+    speakerRoleMap[speakerId] = roles.includes(currentRole) ? currentRole : roles[index] || '';
+  });
+}
+
+function updateSpeakerRoleControls() {
+  if (!$speakerRoleControls) return;
+  if (speakerOrder.length === 0) {
+    $speakerRoleControls.hidden = true;
+    $speakerRoleControls.innerHTML = '';
+    return;
+  }
+
+  const roles = getSceneRoles();
+  $speakerRoleControls.hidden = false;
+  $speakerRoleControls.innerHTML = '';
+
+  speakerOrder.forEach(speakerId => {
+    const item = document.createElement('div');
+    item.className = 'speaker-role-item';
+
+    const label = document.createElement('span');
+    label.className = 'speaker-role-label';
+    label.textContent = getSpeakerLabel(speakerId);
+
+    const select = document.createElement('select');
+    select.className = 'speaker-role-select';
+    select.setAttribute('aria-label', `${getSpeakerLabel(speakerId)} 角色`);
+
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = '未指定';
+    select.appendChild(emptyOption);
+
+    roles.forEach(role => {
+      const option = document.createElement('option');
+      option.value = role;
+      option.textContent = role;
+      select.appendChild(option);
+    });
+
+    select.value = speakerRoleMap[speakerId] || '';
+    select.onchange = () => {
+      speakerRoleMap[speakerId] = select.value;
+      refreshTranscriptSpeakerLabels();
+      rebuildTranscriptState();
+      updateCharCount();
+    };
+
+    item.appendChild(label);
+    item.appendChild(select);
+    $speakerRoleControls.appendChild(item);
+  });
+}
+
+function refreshTranscriptSpeakerLabels() {
+  transcriptTurns.forEach(updateTranscriptLine);
+}
+
+function updateTranscriptLine(turn) {
+  if (!turn.element) return;
+  const speaker = turn.element.querySelector('.speaker-chip');
+  const content = turn.element.querySelector('.transcript-content');
+  const displayName = getSpeakerDisplayName(turn.speakerId);
+  if (speaker) {
+    speaker.textContent = displayName;
+    speaker.hidden = !displayName;
+    speaker.title = getSpeakerLabel(turn.speakerId);
+  }
+  if (content) {
+    content.textContent = turn.text;
+  }
 }
 
 // ── 音频采集 ──────────────────────────────────────────────
@@ -465,7 +734,7 @@ function stopRecording() {
 }
 
 // ── 转写文本管理 ──────────────────────────────────────────
-function addTranscriptLine(text, speakerId = '') {
+function renderTranscriptLine(turn) {
   const emptyState = $transcriptContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
 
@@ -476,15 +745,16 @@ function addTranscriptLine(text, speakerId = '') {
   ts.className = 'timestamp';
   ts.textContent = formatTime(new Date());
 
-  const speakerLabel = getSpeakerLabel(speakerId);
+  const speakerLabel = getSpeakerDisplayName(turn.speakerId);
   const speaker = document.createElement('span');
   speaker.className = 'speaker-chip';
   speaker.textContent = speakerLabel;
   speaker.hidden = !speakerLabel;
+  speaker.title = getSpeakerLabel(turn.speakerId);
 
   const content = document.createElement('span');
   content.className = 'transcript-content';
-  content.textContent = text;
+  content.textContent = turn.text;
 
   line.appendChild(ts);
   line.appendChild(speaker);
@@ -494,6 +764,8 @@ function addTranscriptLine(text, speakerId = '') {
   if (autoScroll) {
     $transcriptContainer.scrollTop = $transcriptContainer.scrollHeight;
   }
+
+  return line;
 }
 
 function clearTranscript() {
@@ -504,6 +776,11 @@ function clearTranscript() {
   lastFinalText = '';
   speakerOrder = [];
   speakerLabelMap = {};
+  speakerRoleMap = {};
+  transcriptTurns = [];
+  recentTurnKeys = new Map();
+  turnCounter = 0;
+  updateSpeakerRoleControls();
   updateCharCount();
 }
 
