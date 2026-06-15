@@ -520,15 +520,19 @@ function syncSpeakerRolesWithScene() {
 
 function updateSpeakerRoleControls() {
   if (!$speakerRoleControls) return;
-  if (speakerOrder.length === 0) {
-    $speakerRoleControls.hidden = true;
-    $speakerRoleControls.innerHTML = '';
-    return;
-  }
 
   const roles = getSceneRoles();
   $speakerRoleControls.hidden = false;
   $speakerRoleControls.innerHTML = '';
+
+  const hint = document.createElement('div');
+  hint.className = 'speaker-role-hint';
+  hint.textContent = speakerOrder.length === 0
+    ? `角色映射：等待识别说话人，识别后可设为 ${roles.slice(0, 2).join(' / ')}`
+    : '角色映射：默认按当前场景猜测，识别错了改一次即可';
+  $speakerRoleControls.appendChild(hint);
+
+  if (speakerOrder.length === 0) return;
 
   speakerOrder.forEach(speakerId => {
     const item = document.createElement('div');
