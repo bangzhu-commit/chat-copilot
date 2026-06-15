@@ -48,6 +48,12 @@ const SCENE_UI = {
     emptyTitle: '等待相亲聊天提示',
     emptyHint: '可生成破冰、共鸣、追问、转场和边界提醒'
   },
+  'ai-judge': {
+    label: 'Judge',
+    title: 'AI 评审观察',
+    emptyTitle: '等待评审观察',
+    emptyHint: '可整理证据、疑点、追问、风险和亮点'
+  },
   default: {
     label: 'Cue',
     title: 'AI 追问建议',
@@ -63,6 +69,7 @@ const SCENE_ROLE_PRESETS = {
   'candidate-interview': ['面试官', '候选人'],
   'sales-negotiation': ['客户', '我方'],
   'dating': ['对方', '自己'],
+  'ai-judge': ['选手', '评委'],
   'recording': ['讲述者', '协作者'],
   'training': ['讲师', '学员'],
   default: ['说话人 A', '说话人 B']
@@ -100,6 +107,7 @@ const $interimText = document.getElementById('interimText');
 const $charCount = document.getElementById('charCount');
 const $btnScrollLock = document.getElementById('btnScrollLock');
 const $btnInterviewReview = document.getElementById('btnInterviewReview');
+const $btnJudgingScore = document.getElementById('btnJudgingScore');
 const $statusDot = document.getElementById('statusDot');
 const $statusText = document.getElementById('statusText');
 const $asrStatus = document.getElementById('asrStatus');
@@ -135,6 +143,7 @@ function onSceneModeChange() {
   $suggestionPanelLabel.textContent = ui.label;
   $suggestionPanelTitle.textContent = ui.title;
   $btnInterviewReview.style.display = mode === 'candidate-interview' ? '' : 'none';
+  $btnJudgingScore.style.display = mode === 'ai-judge' ? '' : 'none';
   syncSpeakerRolesWithScene();
   updateSpeakerRoleControls();
   refreshTranscriptSpeakerLabels();
@@ -952,6 +961,57 @@ async function generateInterviewReview() {
   }
 }
 
+async function generateJudgingScore() {
+  if ($sceneMode.value !== 'ai-judge') return;
+  if (fullTranscript.trim().length === 0) {
+    alert('还没有项目展示转写内容，无法生成评分表。');
+    return;
+  }
+  if (isGenerating) {
+    alert('正在生成中，请稍候...');
+    return;
+  }
+
+  isGenerating = true;
+  $btnJudgingScore.disabled = true;
+  $llmStatus.textContent = 'LLM: 评分中...';
+  $llmStatus.style.color = '#f59e0b';
+
+  try {
+    const res = await fetch('/api/judging-score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript: fullTranscript,
+        scriptContent: scriptContent || ''
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error('评分表生成失败:', data.error);
+      $llmStatus.textContent = `LLM: ${data.error}`;
+      $llmStatus.style.color = '#ef4444';
+      return;
+    }
+
+    if (data.score) {
+      addSuggestionGroup(data.score, 'score');
+    }
+
+    $llmStatus.textContent = `LLM: 已生成评分表（${data.model || ''})`;
+    $llmStatus.style.color = '#22c55e';
+  } catch (err) {
+    console.error('评分表请求失败:', err);
+    $llmStatus.textContent = 'LLM: 网络错误';
+    $llmStatus.style.color = '#ef4444';
+  } finally {
+    isGenerating = false;
+    $btnJudgingScore.disabled = false;
+  }
+}
+
 // ── 追问建议显示 ──────────────────────────────────────────
 function addSuggestionGroup(rawText, groupType = 'suggestion') {
   const emptyState = $suggestionsContainer.querySelector('.empty-state');
@@ -971,11 +1031,11 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
 
   // 创建建议组
   const group = document.createElement('div');
-  group.className = `suggestion-group ${groupType === 'review' ? 'review-group' : ''}`;
+  group.className = `suggestion-group ${['review', 'score'].includes(groupType) ? 'review-group' : ''}`;
 
   const header = document.createElement('div');
   header.className = 'group-header';
-  header.textContent = groupType === 'review' ? `${formatTime(new Date())} · 面试复盘` : formatTime(new Date());
+  header.textContent = getSuggestionGroupHeader(groupType);
   group.appendChild(header);
 
   lines.forEach(text => {
@@ -995,7 +1055,7 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
       card.appendChild(tag);
     }
 
-    if (groupType === 'review') {
+    if (['review', 'score'].includes(groupType)) {
       card.classList.add('review-card');
     }
 
@@ -1013,6 +1073,15 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
   $suggestionCount.textContent = suggestionCount;
 }
 
+function getSuggestionGroupHeader(groupType) {
+  const titleMap = {
+    review: '面试复盘',
+    score: '评审评分表'
+  };
+  const title = titleMap[groupType];
+  return title ? `${formatTime(new Date())} · ${title}` : formatTime(new Date());
+}
+
 function getTagClass(tagText) {
   const map = {
     '事实': 'fact',
@@ -1028,7 +1097,10 @@ function getTagClass(tagText) {
     '共鸣': 'empathy',
     '自我披露': 'share',
     '转场': 'transition',
-    '边界': 'boundary'
+    '边界': 'boundary',
+    '证据': 'fact',
+    '疑点': 'risk',
+    '亮点': 'deal'
   };
   return map[tagText] || 'note';
 }

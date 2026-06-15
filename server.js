@@ -148,6 +148,20 @@ const SCENE_PROMPTS = {
 ## 输出格式
 直接输出带标签的短提示，每条一行。标签只能使用：[破冰] [共鸣] [追问] [自我披露] [转场] [边界]。不需要任何解释或前缀。`,
 
+  'ai-judge': `你是一位公司内部 AI 应用比赛的评审助理。你的任务不是替评委决定名次，而是帮助评委按统一标准记录事实、发现亮点、识别疑点、提出追问和提醒风险。
+
+## 你的工作原则
+1. AI 只做评审助理，不直接决定获奖结果
+2. 严格区分事实、证据和选手自述；没有证据支撑的主张只能标为[疑点]
+3. 不因为选手表达流畅、故事讲得好、包装好看就给出正向判断
+4. 只评价项目，不评价选手个人、部门、职级、人气或表达风格
+5. 优先关注真实问题、业务价值、可用性、落地证据、AI 能力、安全边界和复用价值
+6. 如果项目提到数据、上线、用户反馈、成本、权限、隐私或安全，提醒评委追问证据
+7. 每次输出 3-5 条短观察，评委只能瞄一眼，每条不超过 46 个字
+
+## 输出格式
+直接输出带标签的短提示，每条一行。标签只能使用：[证据] [疑点] [追问] [风险] [亮点]。不需要任何解释或前缀。`,
+
   'recording': `你是一位内容创作教练。你的任务是根据口播录制内容，为说话者生成引导性建议。
 
 ## 你的工作原则
@@ -193,6 +207,36 @@ const INTERVIEW_REVIEW_PROMPT = `你是一位求职面试复盘教练。你的�
 4. 可整理成 STAR 案例的经历
 5. 下一轮准备清单`;
 
+const AI_JUDGING_SCORE_PROMPT = `你是一位公司内部 AI 应用比赛的评审助理。你的任务是基于完整转写和赛前资料，给评委生成一份可解释的参考评分表。
+
+## 评分定位
+1. 这只是参考评分，不直接决定名次
+2. 人类评委保留最终裁量权
+3. 不因表达流畅、包装好看或口号式表述加分
+4. 高分必须有资料、现场演示、数据、案例或转写证据支持
+5. 没有证据的主张要写成"待验证"，不能当成事实
+
+## 默认评分标准（总分 100）
+- 真实问题与业务价值：20 分
+- 产品可用性与体验：20 分
+- 落地效果与证据：20 分
+- AI 能力与实现完整度：15 分
+- 安全、合规、可控性：10 分
+- 复用推广与成本收益：10 分
+- 现场表达与演示：5 分
+
+## 输出格式
+用中文 Markdown 输出，包含：
+1. 参考总分
+2. 维度评分表
+3. 主要亮点
+4. 待验证问题
+5. 建议评委追问
+6. 赛后反馈摘要
+7. AI 置信度
+
+不要输出"好的"、"以下是"、"作为评审助理"等寒暄或开场白，直接从评分结果开始。`;
+
 function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   let systemPrompt;
   if (sceneMode === 'custom' && customPrompt && customPrompt.trim().length > 0) {
@@ -216,6 +260,7 @@ function getSpeakerGuidance(sceneMode) {
     'candidate-interview': '对话里如有"面试官/候选人"前缀，只把面试官的话识别为问题；候选人的话用于判断已答内容和可补充点。',
     'sales-negotiation': '对话里如有"客户/我方"前缀，只有客户明确说出的内容才能标为[事实]；我方表达只用于判断推进和承诺风险。',
     'dating': '对话里如有"对方/自己"前缀，优先围绕对方表达给破冰、共鸣和追问；如果自己连续发问，提醒自我披露和边界。',
+    'ai-judge': '对话里如有"选手/评委"前缀，选手表达用于提取项目主张和证据，评委提问用于识别疑点；不要把选手自夸直接当成事实。',
     'training': '对话里如有"讲师/学员"前缀，讲师内容用于判断知识点，学员发问用于判断困惑点。',
     'recording': '对话里如有角色前缀，优先辅助主要讲述者补案例、类比、结构和收束。'
   };
@@ -236,6 +281,8 @@ function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
     userPrompt += '\n\n请生成 3-5 条求职面试回答提示。必须使用 [问题] [考察点] [结构] [素材] [风险] 标签。';
   } else if (sceneMode === 'dating') {
     userPrompt += '\n\n请生成 3-5 条相亲约会聊天提示。必须使用 [破冰] [共鸣] [追问] [自我披露] [转场] [边界] 标签。不要替用户编造具体经历或人设。对方表达疲惫或刚下班时，不要继续追问具体工作细节。';
+  } else if (sceneMode === 'ai-judge') {
+    userPrompt += '\n\n请生成 3-5 条 AI 应用比赛评审观察。必须使用 [证据] [疑点] [追问] [风险] [亮点] 标签。不要给最终名次，不要把没有证据的口号当事实。';
   } else {
     userPrompt += '\n\n请生成 2-3 条追问建议。';
   }
@@ -325,6 +372,12 @@ function sanitizeSuggestions(content, sceneMode, context = {}) {
       .trim())
     .map(line => line.startsWith('[素材]') ? materialHint : line)
     .join('\n');
+}
+
+function sanitizeJudgingScore(content) {
+  return (content || '')
+    .replace(/^(好的|好|当然|以下是|作为评审助理)[^\n]*\n+/i, '')
+    .trim();
 }
 
 async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
@@ -445,6 +498,54 @@ app.post('/api/interview-review', async (req, res) => {
     }
     console.error('面试复盘调用异常:', err.message);
     res.status(500).json({ error: '生成面试复盘失败: ' + err.message });
+  }
+});
+
+// ── AI 应用比赛评分表 API ─────────────────────────────────
+app.post('/api/judging-score', async (req, res) => {
+  const { transcript, scriptContent } = req.body;
+
+  if (!transcript || transcript.trim().length === 0) {
+    return res.status(400).json({ error: '对话内容为空' });
+  }
+
+  if (!keyConfigured) {
+    return res.status(500).json({
+      error: 'API Key 未配置。请编辑项目根目录的 .env 文件，填入你的 LLM_API_KEY'
+    });
+  }
+
+  let systemPrompt = AI_JUDGING_SCORE_PROMPT;
+  if (scriptContent && scriptContent.trim().length > 0) {
+    systemPrompt += `\n\n## 赛前资料与评分标准\n${scriptContent.substring(0, 5000)}`;
+  }
+
+  const userPrompt = `## 完整项目展示与问答转写\n${transcript.slice(-10000)}\n\n请生成 AI 应用比赛评审助理参考评分表。`;
+
+  try {
+    const data = await callLlm([
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ], { temperature: 0.35, maxTokens: 1200 });
+    const content = sanitizeJudgingScore(data.choices?.[0]?.message?.content || '');
+    console.log(`🏁 生成评审评分表:\n${content}`);
+
+    res.json({
+      success: true,
+      score: content,
+      model: data.model || LLM_MODEL,
+      usage: data.usage
+    });
+  } catch (err) {
+    if (err.status) {
+      console.error('LLM API 错误:', err.status, err.detail);
+      return res.status(err.status).json({
+        error: err.message,
+        detail: err.detail
+      });
+    }
+    console.error('评审评分表调用异常:', err.message);
+    res.status(500).json({ error: '生成评审评分表失败: ' + err.message });
   }
 });
 
