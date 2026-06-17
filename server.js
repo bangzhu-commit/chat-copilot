@@ -237,6 +237,37 @@ const AI_JUDGING_SCORE_PROMPT = `你是一位公司内部 AI 应用比赛的评�
 
 不要输出"好的"、"以下是"、"作为评审助理"等寒暄或开场白，直接从评分结果开始。`;
 
+const DEEP_SUPPORTED_SCENES = new Set([
+  'live-host',
+  'interview',
+  'ai-judge',
+  'sales-negotiation',
+  'recruitment'
+]);
+const DEEP_ALLOWED_TAGS = new Set(['追问', '回扣', '反差', '澄清', '风险']);
+
+const DEEP_SUGGESTION_PROMPT = `你是一位实时对话深度追问助手。你的任务不是救场接话，而是在一轮完整表达结束后，帮用户发现更深的追问点。
+
+## 深度追问定义
+1. [追问] 顺着刚才内容继续深挖故事、方法、判断或证据
+2. [回扣] 回到同一说话人前面提到但没有展开的点
+3. [反差] 指出前后表达、承诺和证据之间的张力
+4. [澄清] 要求补定义、补数据、补例子或补边界
+5. [风险] 提醒不要被包装、口号、承诺或模糊表述带偏
+
+## 规则
+1. 只基于输入内容生成，不编造事实、数据、经历或证据
+2. 不要硬造反差；没有真实张力时用[追问]或[澄清]
+3. 不要把普通寒暄问题伪装成深度问题
+4. 每次输出 1-3 条，问题要短，依据要具体
+5. 输出必须是 JSON 数组，不要 Markdown，不要解释，不要代码块
+
+## JSON 字段
+- tag：只能是 追问、回扣、反差、澄清、风险
+- question：一句可直接问出口的问题，不超过 46 个中文字符
+- why：为什么值得问，不超过 80 个中文字符
+- basedOn：依据来自哪句或哪组信息，不超过 90 个中文字符`;
+
 function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   let systemPrompt;
   if (sceneMode === 'custom' && customPrompt && customPrompt.trim().length > 0) {
@@ -380,6 +411,105 @@ function sanitizeJudgingScore(content) {
     .trim();
 }
 
+function getDeepSceneGuidance(sceneMode) {
+  const guidance = {
+    'live-host': '直播主持：优先从嘉宾表达中找观众会好奇的反差、细节和证据；主持人串场只作上下文。',
+    'interview': '访谈采访：优先追故事细节、关键选择、未展开的判断和前后变化。',
+    'ai-judge': 'AI 应用评审：重点发现项目价值、上线状态、效果数据、安全边界和推广成本之间的证据缺口。',
+    'sales-negotiation': '销售谈判：重点发现预算、决策人、时间线、竞品、采购流程和下一步承诺的变化或缺口。',
+    'recruitment': '招聘面试：重点发现候选人回答里的 STAR 缺口、量化证据不足和前后不一致。'
+  };
+  return guidance[sceneMode] || '优先围绕最近完整表达生成深度追问。';
+}
+
+function formatDeepRound(round) {
+  if (!round || !round.text) return '无';
+  const speaker = round.role || round.speakerLabel || round.speakerId || '未知说话人';
+  return `${speaker}：${String(round.text).slice(-1200)}`;
+}
+
+function formatDeepRoundList(rounds) {
+  if (!Array.isArray(rounds) || rounds.length === 0) return '无';
+  return rounds
+    .slice(-6)
+    .map((round, index) => `${index + 1}. ${formatDeepRound(round)}`)
+    .join('\n');
+}
+
+function buildDeepSuggestionUserPrompt({ sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, triggerType }) {
+  let prompt = `## 场景规则\n${getDeepSceneGuidance(sceneMode)}\n\n`;
+  prompt += `## 触发方式\n${triggerType === 'auto' ? '自动深度追问' : '手动深度追问'}\n\n`;
+  prompt += `## 最近完成的一轮表达\n${formatDeepRound(completedRound)}\n\n`;
+  prompt += `## 同一说话人前文\n${formatDeepRoundList(sameSpeakerHistory)}\n\n`;
+  prompt += `## 最近其他轮次\n${formatDeepRoundList(recentRounds)}\n\n`;
+
+  if (completedRound?.fallback) {
+    prompt += '## 降级说明\n当前没有可靠说话人信息，请按最近上下文生成，不要假设谁是主持人、嘉宾、客户或评委。\n\n';
+  }
+
+  if (scriptContent && scriptContent.trim()) {
+    prompt += `## 上传资料\n${scriptContent.substring(0, 2500)}\n\n`;
+  }
+
+  prompt += '请输出 JSON 数组。';
+  return prompt;
+}
+
+function parseJsonArray(content) {
+  const text = (content || '').trim();
+  if (!text) return [];
+
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    const start = text.indexOf('[');
+    const end = text.lastIndexOf(']');
+    if (start >= 0 && end > start) {
+      try {
+        const parsed = JSON.parse(text.slice(start, end + 1));
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    }
+  }
+  return [];
+}
+
+function normalizeDeepSuggestions(items, rawContent = '') {
+  const normalized = (Array.isArray(items) ? items : [])
+    .map(item => ({
+      tag: String(item?.tag || '').replace(/[\[\]]/g, '').trim(),
+      question: String(item?.question || '').trim(),
+      why: String(item?.why || '').trim(),
+      basedOn: String(item?.basedOn || item?.based_on || '').trim()
+    }))
+    .filter(item => item.question)
+    .map(item => ({
+      tag: DEEP_ALLOWED_TAGS.has(item.tag) ? item.tag : '追问',
+      question: item.question.slice(0, 80),
+      why: item.why.slice(0, 120),
+      basedOn: item.basedOn.slice(0, 140)
+    }))
+    .slice(0, 3);
+
+  if (normalized.length > 0) return normalized;
+
+  const fallbackLine = (rawContent || '')
+    .split('\n')
+    .map(line => line.replace(/^[-*\d\.\、\)\s]+/, '').trim())
+    .find(Boolean);
+  if (!fallbackLine) return [];
+
+  return [{
+    tag: '追问',
+    question: fallbackLine.replace(/^(\[[^\]]+\])\s*/, '').slice(0, 80),
+    why: '模型未返回结构化结果，已按第一条内容降级展示',
+    basedOn: '最近一轮完整表达'
+  }];
+}
+
 async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
   const response = await fetch(LLM_ENDPOINT, {
     method: 'POST',
@@ -450,6 +580,61 @@ app.post('/api/generate-suggestions', async (req, res) => {
     }
     console.error('LLM 调用异常:', err.message);
     res.status(500).json({ error: '调用 LLM 失败: ' + err.message });
+  }
+});
+
+// ── 深度追问 API ─────────────────────────────────────────
+app.post('/api/deep-suggestions', async (req, res) => {
+  const { sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, triggerType } = req.body;
+
+  if (!DEEP_SUPPORTED_SCENES.has(sceneMode)) {
+    return res.status(400).json({ error: '当前场景不支持深度追问' });
+  }
+
+  if (!completedRound || !completedRound.text || completedRound.text.trim().length === 0) {
+    return res.status(400).json({ error: '缺少完整表达内容' });
+  }
+
+  if (!keyConfigured) {
+    return res.status(500).json({
+      error: 'API Key 未配置。请编辑项目根目录的 .env 文件，填入你的 LLM_API_KEY'
+    });
+  }
+
+  const userPrompt = buildDeepSuggestionUserPrompt({
+    sceneMode,
+    scriptContent,
+    completedRound,
+    sameSpeakerHistory,
+    recentRounds,
+    triggerType
+  });
+
+  try {
+    const data = await callLlm([
+      { role: 'system', content: DEEP_SUGGESTION_PROMPT },
+      { role: 'user', content: userPrompt }
+    ], { temperature: 0.35, maxTokens: 700 });
+    const rawContent = data.choices?.[0]?.message?.content || '';
+    const suggestions = normalizeDeepSuggestions(parseJsonArray(rawContent), rawContent);
+    console.log('🔎 生成深度追问:', suggestions);
+
+    res.json({
+      success: true,
+      suggestions,
+      model: data.model || LLM_MODEL,
+      usage: data.usage
+    });
+  } catch (err) {
+    if (err.status) {
+      console.error('LLM API 错误:', err.status, err.detail);
+      return res.status(err.status).json({
+        error: err.message,
+        detail: err.detail
+      });
+    }
+    console.error('深度追问调用异常:', err.message);
+    res.status(500).json({ error: '生成深度追问失败: ' + err.message });
   }
 });
 

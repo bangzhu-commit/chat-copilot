@@ -309,6 +309,17 @@ select {
   border-color: rgba(187, 161, 255, 0.5);
 }
 
+.btn-deep {
+  color: #b7f0ff;
+  background: linear-gradient(180deg, rgba(72, 211, 255, 0.12), transparent), #13242b;
+  border-color: rgba(72, 211, 255, 0.32);
+}
+
+.btn-deep:hover {
+  background: #17313a;
+  border-color: rgba(72, 211, 255, 0.56);
+}
+
 .btn-small {
   min-height: 28px;
   background: transparent;
@@ -327,6 +338,17 @@ select {
   background: var(--bg-card);
   color: var(--text-primary);
   border-color: #3a414c;
+}
+
+.btn-deep-toggle {
+  color: #a7dff0;
+  border-color: rgba(72, 211, 255, 0.26);
+}
+
+.btn-deep-toggle.active {
+  color: #11181c;
+  background: #7de3ff;
+  border-color: rgba(125, 227, 255, 0.72);
 }
 
 .upload-btn {
@@ -593,6 +615,89 @@ select {
 
 .suggestion-card.review-card {
   border-left-color: var(--accent-purple);
+}
+
+.suggestion-group.deep-group {
+  margin-bottom: 18px;
+}
+
+.suggestion-group.deep-group .deep-header {
+  color: #7de3ff;
+  letter-spacing: 0;
+}
+
+.suggestion-group.deep-group .deep-header::after {
+  background: linear-gradient(90deg, rgba(125, 227, 255, 0.56), var(--border-color));
+}
+
+.deep-notice {
+  width: fit-content;
+  margin: 0 2px 9px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgba(125, 227, 255, 0.08);
+  border: 1px solid rgba(125, 227, 255, 0.2);
+  color: #b7f0ff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.suggestion-card.deep-card {
+  background:
+    linear-gradient(180deg, rgba(125, 227, 255, 0.1), transparent 52%),
+    #151d23;
+  border-color: rgba(125, 227, 255, 0.34);
+  border-left-color: #7de3ff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+}
+
+.suggestion-card.deep-card:first-of-type {
+  background:
+    linear-gradient(180deg, rgba(125, 227, 255, 0.14), transparent 54%),
+    #162127;
+  border-color: rgba(125, 227, 255, 0.48);
+  border-left-color: #7de3ff;
+}
+
+.deep-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.deep-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: #7de3ff;
+  color: #10171b;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.deep-meta .suggestion-tag {
+  margin-bottom: 0;
+}
+
+.suggestion-card .deep-question {
+  font-size: 22px;
+  line-height: 1.5;
+}
+
+.suggestion-card:first-of-type .deep-question {
+  font-size: 23px;
+}
+
+.suggestion-detail {
+  margin-top: 11px;
+  color: #9aa9b6;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .suggestion-card:hover {
@@ -906,6 +1011,11 @@ select {
   .suggestion-card:first-of-type .suggestion-text {
     font-size: 19px;
   }
+
+  .suggestion-card .deep-question,
+  .suggestion-card:first-of-type .deep-question {
+    font-size: 20px;
+  }
 }
 
 @media (max-width: 680px) {
@@ -935,7 +1045,8 @@ select {
   .audio-source select,
   .scene-mode select,
   .btn,
-  .upload-btn {
+  .upload-btn,
+  .btn-deep-toggle {
     width: 100%;
     max-width: none;
   }
