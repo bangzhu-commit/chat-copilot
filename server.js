@@ -13,6 +13,9 @@ const PORT = process.env.PORT || 3000;
 const LLM_ENDPOINT = process.env.LLM_ENDPOINT || 'https://api.deepseek.com/chat/completions';
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
 const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
+const SUGGESTION_CONTEXT_CHARS = 12000;
+const MEMORY_MAX_CHARS = 1600;
+const LONG_CONTEXT_MEMORY_ENABLED = process.env.LONG_CONTEXT_MEMORY_ENABLED !== 'false';
 
 // 追问触发参数（可在 .env 覆盖，一般不用动）
 const SILENCE_THRESHOLD = parseInt(process.env.SILENCE_THRESHOLD) || 3000;
@@ -268,6 +271,22 @@ const DEEP_SUGGESTION_PROMPT = `你是一位实时对话深度追问助手。你
 - why：为什么值得问，不超过 80 个中文字符
 - basedOn：依据来自哪句或哪组信息，不超过 90 个中文字符`;
 
+const CONVERSATION_MEMORY_PROMPT = `你是一位实时采访的对话记忆整理助手。基于旧记忆和新转写，维护一份供主持人追问使用的长期记忆。
+
+## 只保留
+1. 角色明确说过的关键事实、经历、观点和数据
+2. 时间线、因果链、立场变化、尚未展开的线索
+3. 主持人已经问过的问题和嘉宾尚未回答清楚的点
+4. 前后可能矛盾的说法，但必须标注为“待核对”而不是直接下结论
+
+## 禁止
+1. 编造转写里没有的人名、数据、动机或因果
+2. 写空泛评价、寒暄、建议或追问句
+3. 逐句复述原文
+
+## 输出
+直接输出中文要点，最多 1200 个汉字。按“已知事实 / 线索与变化 / 待追问或待核对”组织；没有内容的栏目省略。`;
+
 function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   let systemPrompt;
   if (sceneMode === 'custom' && customPrompt && customPrompt.trim().length > 0) {
@@ -301,10 +320,10 @@ function getSpeakerGuidance(sceneMode) {
 function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
   let userPrompt = '';
   if (previousSummary) {
-    userPrompt += `## 之前的对话摘要\n${previousSummary}\n\n`;
+    userPrompt += `## 较早对话记忆\n${previousSummary}\n\n`;
   }
   userPrompt += `## 发言人使用规则\n${getSpeakerGuidance(sceneMode)}\n\n`;
-  userPrompt += `## 最近的对话内容\n${transcript.slice(-3000)}`;
+  userPrompt += `## 最近的对话内容\n${transcript.slice(-SUGGESTION_CONTEXT_CHARS)}`;
 
   if (sceneMode === 'sales-negotiation') {
     userPrompt += '\n\n请生成 3-5 条销售谈判实时洞察。必须使用 [事实] [风险] [推荐] [谈判] 标签。';
@@ -436,9 +455,12 @@ function formatDeepRoundList(rounds) {
     .join('\n');
 }
 
-function buildDeepSuggestionUserPrompt({ sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, triggerType }) {
+function buildDeepSuggestionUserPrompt({ sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, conversationMemory, triggerType }) {
   let prompt = `## 场景规则\n${getDeepSceneGuidance(sceneMode)}\n\n`;
   prompt += `## 触发方式\n${triggerType === 'auto' ? '自动深度追问' : '手动深度追问'}\n\n`;
+  if (conversationMemory) {
+    prompt += `## 较早对话记忆\n${conversationMemory.slice(-MEMORY_MAX_CHARS)}\n\n`;
+  }
   prompt += `## 最近完成的一轮表达\n${formatDeepRound(completedRound)}\n\n`;
   prompt += `## 同一说话人前文\n${formatDeepRoundList(sameSpeakerHistory)}\n\n`;
   prompt += `## 最近其他轮次\n${formatDeepRoundList(recentRounds)}\n\n`;
@@ -508,6 +530,23 @@ function normalizeDeepSuggestions(items, rawContent = '') {
     why: '模型未返回结构化结果，已按第一条内容降级展示',
     basedOn: '最近一轮完整表达'
   }];
+}
+
+function buildConversationMemoryUserPrompt(sceneMode, previousMemory, transcriptChunk) {
+  let prompt = `## 当前场景\n${sceneMode === 'interview' ? '访谈采访' : '直播主持'}\n\n`;
+  if (previousMemory) {
+    prompt += `## 旧记忆\n${previousMemory.slice(-MEMORY_MAX_CHARS)}\n\n`;
+  }
+  prompt += `## 新增转写\n${transcriptChunk.slice(-9000)}\n\n`;
+  prompt += '请更新长期对话记忆。';
+  return prompt;
+}
+
+function sanitizeConversationMemory(content) {
+  return (content || '')
+    .replace(/^(好的|好|当然|以下是|对话记忆)[：:：\s]*/i, '')
+    .trim()
+    .slice(-MEMORY_MAX_CHARS);
 }
 
 async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
@@ -583,9 +622,50 @@ app.post('/api/generate-suggestions', async (req, res) => {
   }
 });
 
+// ── 长对话记忆 API ───────────────────────────────────────
+app.post('/api/conversation-memory', async (req, res) => {
+  const { sceneMode, previousMemory, transcriptChunk } = req.body;
+
+  if (!['live-host', 'interview'].includes(sceneMode)) {
+    return res.status(400).json({ error: '当前场景不需要长对话记忆' });
+  }
+
+  if (!transcriptChunk || transcriptChunk.trim().length === 0) {
+    return res.status(400).json({ error: '新增转写内容为空' });
+  }
+
+  if (!keyConfigured) {
+    return res.status(500).json({
+      error: 'API Key 未配置。请编辑项目根目录的 .env 文件，填入你的 LLM_API_KEY'
+    });
+  }
+
+  try {
+    const data = await callLlm([
+      { role: 'system', content: CONVERSATION_MEMORY_PROMPT },
+      { role: 'user', content: buildConversationMemoryUserPrompt(sceneMode, previousMemory, transcriptChunk) }
+    ], { temperature: 0.2, maxTokens: 900 });
+    const memory = sanitizeConversationMemory(data.choices?.[0]?.message?.content || '');
+
+    res.json({
+      success: true,
+      memory,
+      model: data.model || LLM_MODEL,
+      usage: data.usage
+    });
+  } catch (err) {
+    if (err.status) {
+      console.error('对话记忆 API 错误:', err.status, err.detail);
+      return res.status(err.status).json({ error: err.message, detail: err.detail });
+    }
+    console.error('对话记忆调用异常:', err.message);
+    res.status(500).json({ error: '更新对话记忆失败: ' + err.message });
+  }
+});
+
 // ── 深度追问 API ─────────────────────────────────────────
 app.post('/api/deep-suggestions', async (req, res) => {
-  const { sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, triggerType } = req.body;
+  const { sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, conversationMemory, triggerType } = req.body;
 
   if (!DEEP_SUPPORTED_SCENES.has(sceneMode)) {
     return res.status(400).json({ error: '当前场景不支持深度追问' });
@@ -607,6 +687,7 @@ app.post('/api/deep-suggestions', async (req, res) => {
     completedRound,
     sameSpeakerHistory,
     recentRounds,
+    conversationMemory,
     triggerType
   });
 
@@ -742,7 +823,8 @@ app.get('/api/config', (req, res) => {
     minTextLength: MIN_TEXT_LENGTH,
     model: LLM_MODEL,
     hasApiKey: keyConfigured,
-    hasAsrConfig: asrConfigured
+    hasAsrConfig: asrConfigured,
+    longContextMemoryEnabled: LONG_CONTEXT_MEMORY_ENABLED
   });
 });
 

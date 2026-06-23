@@ -26,9 +26,11 @@
 | 功能 | 说明 |
 |------|------|
 | 🗣️ **实时语音转写** | 基于豆包 Seed-ASR 2.0 大模型，高精度中文语音实时转文字 |
+| ⚡ **双层实时转写** | 识别中的文字先在右侧即时显示；分句和说话人确认后，再替换为带角色的正式记录 |
 | 🧑‍🤝‍🧑 **发言人标签** | 右侧常驻角色映射状态；开启火山 ASR 分句和说话人信息后，可显示并映射「嘉宾 / 主持人」「客户 / 我方」等角色，识别错了可手动改一次 |
 | 💡 **AI 场景提示** | 检测到说话停顿后自动生成追问、洞察或回答提示，也支持手动触发（`Cmd+Enter`） |
 | 🔎 **深度追问** | 支持手动触发和自动触发，基于最近一轮完整表达生成回扣、反差、澄清和风险问题 |
+| 🧠 **长采访记忆** | 直播主持、访谈采访会保留近期原文和滚动记忆，减少长对话中前后断裂 |
 | 🎭 **9 种场景模式** | 直播主持 / 访谈采访 / 招聘面试（面试官） / 求职面试 / 销售谈判 / 相亲约会 / AI 应用评审 / 口播录制 / 培训教学 |
 | ⚙️ **自定义指令** | 场景模式不够用？直接写你自己的 Prompt |
 | 📁 **资料上传** | 上传节目提纲、嘉宾资料、客户背景、简历/JD、相亲资料或比赛项目卡（.txt / .md），AI 会结合内容给出更贴合的提示 |
@@ -132,6 +134,7 @@ ASR_ACCESS_TOKEN=your-access-token-here   # 火山引擎 Access Token
 SILENCE_THRESHOLD=2000    # 停顿多久触发追问（毫秒）
 MIN_INTERVAL=20000        # 两次追问最小间隔（毫秒）
 MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
+LONG_CONTEXT_MEMORY_ENABLED=true # 直播/访谈长对话记忆；设为 false 可减少后台调用
 ```
 
 **LLM 模型推荐**：
@@ -217,6 +220,14 @@ AI 用在哪里：问答、总结、生成、识别、检索或自动化
 - **自动深度追问**：打开「自动深度」后，系统会在说话人切换或长停顿后判断是否生成，默认关闭，避免刷屏。
 - **第一版支持场景**：直播主持、访谈采访、AI 应用评审、销售谈判、招聘面试（面试官）。
 - **输出边界**：不硬造反差，不把普通问题伪装成深度问题；没有说话人信息时，只按最近上下文生成。
+
+## 🧠 长采访记忆与转写速度
+
+直播主持和访谈采访使用两层转写：右侧会先出现带「识别中」标识的实时草稿，随后由 ASR 分句和说话人识别替换成正式记录。因此，正式记录略晚于草稿是正常的，但用户不需要等待才能看到文字。
+
+这两个场景的普通追问会带入最近约 12,000 字原文；当转写累计约 12 个分句或 3,600 字时，系统会在后台整理一份角色化记忆，保留已知事实、变化、未展开线索和待核对点。深度追问也会使用这份记忆。
+
+滚动记忆会增加低频 LLM 调用。它只在直播主持和访谈采访启用，且不会阻塞正在生成的追问；更看重成本时，在 `.env` 中设置 `LONG_CONTEXT_MEMORY_ENABLED=false` 即可关闭。
 
 ## 🧩 输出示例
 
@@ -322,6 +333,8 @@ Whether you're hosting a live stream, conducting an interview, running a job int
 - 🗣️ **Real-time Speech-to-Text** — Powered by ByteDance's Seed-ASR 2.0 (Chinese language)
 - 🧑‍🤝‍🧑 **Speaker Labels** — Keeps role mapping visible, maps ASR speakers to scene roles, and lets users correct the role once when needed
 - 💡 **Scenario-Aware Cues** — Auto-triggered on speech pauses, or manually via `Cmd+Enter`
+- ⚡ **Two-Layer Live Transcript** — Shows interim text immediately, then replaces it with a speaker-attributed final turn
+- 🧠 **Long Interview Memory** — Live host and interview modes combine recent transcript with a rolling factual memory
 - 🎭 **9 Scene Modes** — Live hosting, interviews, interviewer mode, candidate mode, sales negotiation, dating, AI judging, video recording, and training
 - ⚙️ **Custom Prompts** — Write your own system prompt for any scenario
 - 📁 **Material Upload** — Upload show notes, guest bios, customer context, resumes, job descriptions, dating context, or project cards

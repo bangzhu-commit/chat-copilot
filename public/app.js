@@ -14,6 +14,7 @@ let audioContext = null;
 let mediaStream = null;
 let workletNode = null;
 let lastFinalText = '';      // 上一次 definite 文本（用于去重）
+let interimTranscriptLine = null;
 
 // 对话数据
 let fullTranscript = '';         // 全量转写文本
@@ -34,6 +35,11 @@ let deepTurnTimer = null;
 let deepRoundCounter = 0;
 let isGeneratingDeep = false;
 let lastDeepTriggerTime = 0;
+let conversationMemory = '';
+let memoryTurnCursor = 0;
+let isMemoryGenerating = false;
+let memoryRetryAfter = 0;
+let conversationMemoryScene = '';
 
 // 上传资料内容
 let scriptContent = '';
@@ -94,6 +100,10 @@ const DEEP_SUPPORTED_SCENES = new Set([
 const DEEP_TURN_SILENCE_MS = 4000;
 const DEEP_MIN_TEXT_LENGTH = 60;
 const DEEP_MIN_INTERVAL = 20000;
+const LONG_CONTEXT_SCENES = new Set(['live-host', 'interview']);
+const RECENT_CONTEXT_CHARS = 12000;
+const MEMORY_BATCH_TURNS = 12;
+const MEMORY_BATCH_CHARS = 3600;
 
 // 配置（从后端加载）
 let appConfig = {
@@ -102,7 +112,8 @@ let appConfig = {
   minTextLength: 100,
   model: '',
   hasApiKey: false,
-  hasAsrConfig: false
+  hasAsrConfig: false,
+  longContextMemoryEnabled: true
 };
 
 // 追问触发控制
@@ -123,7 +134,6 @@ const $suggestionPanelLabel = document.getElementById('suggestionPanelLabel');
 const $suggestionPanelTitle = document.getElementById('suggestionPanelTitle');
 const $transcriptContainer = document.getElementById('transcriptContainer');
 const $speakerRoleControls = document.getElementById('speakerRoleControls');
-const $interimText = document.getElementById('interimText');
 const $charCount = document.getElementById('charCount');
 const $btnScrollLock = document.getElementById('btnScrollLock');
 const $btnDeepTrigger = document.getElementById('btnDeepTrigger');
@@ -154,6 +164,10 @@ async function init() {
 // ── 场景模式切换 ──────────────────────────────────────────
 function onSceneModeChange() {
   const mode = $sceneMode.value;
+  if (conversationMemoryScene && conversationMemoryScene !== mode) {
+    resetConversationMemory();
+  }
+  conversationMemoryScene = mode;
   if (mode === 'custom') {
     $customPromptRow.style.display = 'flex';
     $customPrompt.focus();
@@ -320,9 +334,8 @@ function processAsrResult(msg) {
   if (!finalKey) return;
 
   if (definite) {
-    // 最终结果 → 添加到转写区
-    $interimText.textContent = '';
-    $interimText.classList.remove('active');
+    // 最终结果回来后，用带角色的正式记录替换实时草稿。
+    clearInterimTranscript();
 
     // 去重：如果和上一次完全一样则跳过
     if (finalKey !== lastFinalText) {
@@ -333,9 +346,8 @@ function processAsrResult(msg) {
       lastFinalText = finalKey;
     }
   } else {
-    // 中间结果 → 显示为临时文本
-    $interimText.textContent = text;
-    $interimText.classList.add('active');
+    // 中间结果先在转写列表内显示，不等待说话人归属。
+    renderInterimTranscript(text);
   }
 }
 
@@ -430,6 +442,7 @@ function commitTranscriptTurns(rawTurns) {
     newTextSinceLastTrigger += triggerText;
     updateCharCount();
     deepUpdatedTurns.forEach(handleDeepTurnUpdate);
+    maybeRefreshConversationMemory();
   }
   return changed;
 }
@@ -542,6 +555,87 @@ function addCommittedTurn(turn) {
 
 function rebuildTranscriptState() {
   fullTranscript = transcriptTurns.map(formatPromptTranscriptTurn).join('');
+}
+
+function shouldUseConversationMemory(mode = $sceneMode.value) {
+  return appConfig.longContextMemoryEnabled && LONG_CONTEXT_SCENES.has(mode);
+}
+
+function resetConversationMemory() {
+  conversationMemory = '';
+  memoryTurnCursor = 0;
+  memoryRetryAfter = 0;
+}
+
+function maybeRefreshConversationMemory() {
+  if (!shouldUseConversationMemory() || isGenerating || isMemoryGenerating || Date.now() < memoryRetryAfter) return;
+
+  const pendingTurns = transcriptTurns.slice(memoryTurnCursor);
+  const pendingText = pendingTurns.map(formatPromptTranscriptTurn).join('');
+  const hasEnoughTurns = pendingTurns.length >= MEMORY_BATCH_TURNS;
+  const hasEnoughText = pendingText.length >= MEMORY_BATCH_CHARS;
+  if (!hasEnoughTurns && !hasEnoughText) return;
+
+  const memoryChunk = buildConversationMemoryChunk(pendingTurns);
+  refreshConversationMemory(memoryChunk.turns, memoryChunk.text);
+}
+
+function buildConversationMemoryChunk(turns) {
+  const chunkTurns = [];
+  let text = '';
+
+  for (const turn of turns) {
+    const formatted = formatPromptTranscriptTurn(turn);
+    if (chunkTurns.length > 0 && text.length + formatted.length > 8000) break;
+
+    chunkTurns.push(turn);
+    text += formatted;
+
+    if (chunkTurns.length >= MEMORY_BATCH_TURNS || text.length >= MEMORY_BATCH_CHARS) break;
+  }
+
+  return { turns: chunkTurns, text };
+}
+
+async function refreshConversationMemory(turns, transcriptChunk) {
+  isMemoryGenerating = true;
+  const turnCount = turns.length;
+
+  try {
+    const res = await fetch('/api/conversation-memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sceneMode: $sceneMode.value,
+        previousMemory: conversationMemory,
+        transcriptChunk: transcriptChunk.slice(-9000)
+      })
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.warn('对话记忆更新失败:', data.error);
+      memoryRetryAfter = Date.now() + 30000;
+      return;
+    }
+
+    if (data.memory) {
+      conversationMemory = data.memory;
+      memoryTurnCursor += turnCount;
+    } else {
+      memoryRetryAfter = Date.now() + 30000;
+    }
+  } catch (err) {
+    console.warn('对话记忆请求失败:', err);
+    memoryRetryAfter = Date.now() + 30000;
+  } finally {
+    isMemoryGenerating = false;
+    maybeRefreshConversationMemory();
+  }
+}
+
+function getRecentContextForSuggestions() {
+  return fullTranscript.slice(-RECENT_CONTEXT_CHARS);
 }
 
 function handleDeepTurnUpdate(turn) {
@@ -733,6 +827,8 @@ function updateSpeakerRoleControls() {
       speakerRoleMap[speakerId] = select.value;
       refreshTranscriptSpeakerLabels();
       rebuildTranscriptState();
+      resetConversationMemory();
+      maybeRefreshConversationMemory();
       updateCharCount();
     };
 
@@ -898,8 +994,7 @@ function stopRecording() {
   $btnToggle.classList.remove('recording');
   setStatus('ready', '已停止');
   $asrStatus.textContent = 'ASR: 已停止';
-  $interimText.textContent = '';
-  $interimText.classList.remove('active');
+  clearInterimTranscript();
 
   if (timerInterval) {
     clearInterval(timerInterval);
@@ -908,6 +1003,49 @@ function stopRecording() {
 }
 
 // ── 转写文本管理 ──────────────────────────────────────────
+function renderInterimTranscript(text) {
+  const contentText = normalizeTranscriptText(text);
+  if (!contentText) return;
+
+  const emptyState = $transcriptContainer.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  if (!interimTranscriptLine) {
+    interimTranscriptLine = document.createElement('div');
+    interimTranscriptLine.className = 'transcript-line interim-line';
+
+    const ts = document.createElement('span');
+    ts.className = 'timestamp';
+    ts.textContent = '实时';
+
+    const chip = document.createElement('span');
+    chip.className = 'interim-chip';
+    chip.textContent = '识别中';
+
+    const content = document.createElement('span');
+    content.className = 'transcript-content';
+
+    interimTranscriptLine.appendChild(ts);
+    interimTranscriptLine.appendChild(chip);
+    interimTranscriptLine.appendChild(content);
+    $transcriptContainer.appendChild(interimTranscriptLine);
+  }
+
+  const content = interimTranscriptLine.querySelector('.transcript-content');
+  if (content) content.textContent = contentText;
+
+  if (autoScroll) {
+    $transcriptContainer.scrollTop = $transcriptContainer.scrollHeight;
+  }
+}
+
+function clearInterimTranscript() {
+  if (interimTranscriptLine) {
+    interimTranscriptLine.remove();
+    interimTranscriptLine = null;
+  }
+}
+
 function renderTranscriptLine(turn) {
   const emptyState = $transcriptContainer.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
@@ -944,6 +1082,7 @@ function renderTranscriptLine(turn) {
 
 function clearTranscript() {
   if (!confirm('确定要清空所有转写文字吗？')) return;
+  clearInterimTranscript();
   $transcriptContainer.innerHTML = '';
   fullTranscript = '';
   newTextSinceLastTrigger = '';
@@ -955,6 +1094,7 @@ function clearTranscript() {
   recentTurnKeys = new Map();
   turnCounter = 0;
   resetDeepState();
+  resetConversationMemory();
   updateSpeakerRoleControls();
   updateCharCount();
 }
@@ -1038,9 +1178,9 @@ async function generateSuggestions() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        transcript: fullTranscript.slice(-3000),
+        transcript: getRecentContextForSuggestions(),
         scriptContent: scriptContent || '',
-        previousSummary: '',
+        previousSummary: shouldUseConversationMemory() ? conversationMemory : '',
         sceneMode: $sceneMode.value,
         customPrompt: $customPrompt.value || ''
       })
@@ -1079,6 +1219,7 @@ async function generateSuggestions() {
     newTextSinceLastTrigger = textForThisTrigger + newTextSinceLastTrigger;
   } finally {
     isGenerating = false;
+    maybeRefreshConversationMemory();
   }
 }
 
@@ -1197,6 +1338,7 @@ async function generateDeepSuggestions(triggerType, sourceRound = null) {
         completedRound: serializeDeepRound(round),
         sameSpeakerHistory: getSameSpeakerHistory(round),
         recentRounds: getRecentRounds(round),
+        conversationMemory: shouldUseConversationMemory() ? conversationMemory : '',
         triggerType
       })
     });
@@ -1226,6 +1368,7 @@ async function generateDeepSuggestions(triggerType, sourceRound = null) {
     isGeneratingDeep = false;
     if ($btnDeepTrigger) $btnDeepTrigger.disabled = false;
     if ($btnDeepAuto) $btnDeepAuto.disabled = false;
+    maybeRefreshConversationMemory();
   }
 }
 

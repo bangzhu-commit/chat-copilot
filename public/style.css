@@ -801,22 +801,32 @@ select {
   overflow-wrap: anywhere;
 }
 
-.interim-text {
-  display: none;
-  min-height: 0;
-  padding: 10px 18px;
-  color: var(--text-secondary);
-  background: rgba(110, 168, 255, 0.08);
-  border-top: 1px solid var(--border-color);
-  font-size: 16px;
-  font-style: italic;
-  line-height: 1.6;
-  flex-shrink: 0;
-  overflow-wrap: anywhere;
+.transcript-line.interim-line {
+  margin: 1px 0;
+  padding: 8px 10px;
+  border: 1px dashed rgba(125, 227, 255, 0.26);
+  border-radius: 7px;
+  background: rgba(72, 211, 255, 0.06);
+  color: #b9d6df;
 }
 
-.interim-text.active {
-  display: block;
+.transcript-line.interim-line .timestamp {
+  color: #7de3ff;
+}
+
+.interim-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-right: 9px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(125, 227, 255, 0.12);
+  border: 1px solid rgba(125, 227, 255, 0.26);
+  color: #7de3ff;
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: 1px;
 }
 
 /* 空状态 */
