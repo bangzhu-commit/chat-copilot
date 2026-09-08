@@ -7,15 +7,34 @@ const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const JSZip = require('jszip');
+const { filterNovelItems } = require('./public/question-quality');
 
 // ── 从 .env 读取配置 ──────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 const LLM_ENDPOINT = process.env.LLM_ENDPOINT || 'https://api.deepseek.com/chat/completions';
 const LLM_API_KEY = process.env.LLM_API_KEY || '';
 const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
+const LLM_MODEL_FAST = process.env.LLM_MODEL_FAST || LLM_MODEL;
+const LLM_MODEL_DEEP = process.env.LLM_MODEL_DEEP || LLM_MODEL;
+const LLM_MODEL_RECAP = process.env.LLM_MODEL_RECAP || LLM_MODEL;
+const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS, 10) || 60000;
 const SUGGESTION_CONTEXT_CHARS = 12000;
-const MEMORY_MAX_CHARS = 1600;
+const MEMORY_MAX_CHARS = 5000;
 const LONG_CONTEXT_MEMORY_ENABLED = process.env.LONG_CONTEXT_MEMORY_ENABLED !== 'false';
+const DEEP_CONTEXT_MAX_AGE_MS = 90000;
+const DEEP_MIN_SCORE = 80;
+const DEEP_MIN_CONFIDENCE = 70;
+
+function getProviderHost(endpoint) {
+  try {
+    return new URL(endpoint).host;
+  } catch (_) {
+    return String(endpoint || '').replace(/^https?:\/\//, '').split('/')[0] || 'unknown';
+  }
+}
+
+const LLM_PROVIDER_HOST = getProviderHost(LLM_ENDPOINT);
 
 // 追问触发参数（可在 .env 覆盖，一般不用动）
 const SILENCE_THRESHOLD = parseInt(process.env.SILENCE_THRESHOLD) || 3000;
@@ -36,7 +55,7 @@ const app = express();
 const server = http.createServer(app);
 
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '8mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── 文件上传（脚本/嘉宾资料/业务资料）──────────────────────────
@@ -50,21 +69,28 @@ app.post('/api/upload-script', upload.single('file'), (req, res) => {
     return res.status(400).json({ error: '未收到文件' });
   }
 
-  const ext = path.extname(req.file.originalname).toLowerCase();
+  const filename = normalizeUploadFilename(req.file.originalname);
+  const ext = path.extname(filename).toLowerCase();
   if (!['.txt', '.md'].includes(ext)) {
     return res.status(400).json({ error: '仅支持 .txt 和 .md 文件' });
   }
 
   const content = req.file.buffer.toString('utf-8');
-  console.log(`📄 收到资料文件: ${req.file.originalname} (${content.length} 字)`);
+  console.log(`📄 收到资料文件: ${filename} (${content.length} 字)`);
 
   res.json({
     success: true,
-    filename: req.file.originalname,
+    filename,
     content: content,
     charCount: content.length
   });
 });
+
+function normalizeUploadFilename(filename) {
+  const original = String(filename || '资料');
+  const decoded = Buffer.from(original, 'latin1').toString('utf8');
+  return decoded.includes('\uFFFD') ? original : decoded;
+}
 
 // ── 场景模式 Prompt 模板 ──────────────────────────────────
 const SCENE_PROMPTS = {
@@ -240,6 +266,26 @@ const AI_JUDGING_SCORE_PROMPT = `你是一位公司内部 AI 应用比赛的评�
 
 不要输出"好的"、"以下是"、"作为评审助理"等寒暄或开场白，直接从评分结果开始。`;
 
+const EXPORT_RECAP_PROMPT = `你是一位会后复盘整理助手。你的任务是把实时对话副驾产生的 AI 观察、追问、疑点、风险、亮点和评分内容整理成一页可复盘的中文 Markdown。
+
+## 依据优先级
+1. 优先使用 AI 输出卡片里的标签、判断点、追问和依据
+2. 其次使用完整转写补充上下文
+3. 上传资料只作背景参考，不要逐段复述
+
+## 输出要求
+1. 不编造没有出现过的人名、公司、数据、承诺或结论
+2. 区分“已经有证据”和“待核实/待追问”
+3. 不要替人类评委直接定最终名次
+4. 直接输出 Markdown，不要寒暄，不要代码块
+
+## 固定结构
+### 一句话结论
+### 关键判断点
+### 最值得回看的追问
+### 疑点与风险
+### 后续行动 / 待核实`;
+
 const DEEP_SUPPORTED_SCENES = new Set([
   'live-host',
   'interview',
@@ -249,7 +295,7 @@ const DEEP_SUPPORTED_SCENES = new Set([
 ]);
 const DEEP_ALLOWED_TAGS = new Set(['追问', '回扣', '反差', '澄清', '风险']);
 
-const DEEP_SUGGESTION_PROMPT = `你是一位实时对话深度追问助手。你的任务不是救场接话，而是在一轮完整表达结束后，帮用户发现更深的追问点。
+const DEEP_SUGGESTION_PROMPT = `你是一位实时对话深度追问候选生成器。你的任务不是救场接话，而是在一轮完整表达结束后，找出真正值得打断节目节奏去问的问题。
 
 ## 深度追问定义
 1. [追问] 顺着刚才内容继续深挖故事、方法、判断或证据
@@ -261,23 +307,29 @@ const DEEP_SUGGESTION_PROMPT = `你是一位实时对话深度追问助手。你
 ## 规则
 1. 只基于输入内容生成，不编造事实、数据、经历或证据
 2. 不要硬造反差；没有真实张力时用[追问]或[澄清]
-3. 不要把普通寒暄问题伪装成深度问题
-4. 每次输出 1-3 条，问题要短，依据要具体
-5. 输出必须是 JSON 数组，不要 Markdown，不要解释，不要代码块
+3. 不要把普通寒暄、文件字数、模块数量、术语释义等浅问题伪装成深度问题
+4. 先在内部比较“信息增量、观众价值、证据强度、可直接问出口”四项，再输出最多 2 个候选
+5. [回扣] [反差] [风险] 必须能指出至少两处具体信息；证据不足就不要使用这些标签
+6. ASR 可能把英文术语、产品名和专有名词识别错。孤立、异常或语义不通的词只能请求确认，不能作为深挖前提
+7. 不得重复或改写“已经展示/已经问过的问题”；没有合格候选时直接输出 []
+8. 输出必须是 JSON 数组，不要 Markdown，不要解释，不要代码块
 
 ## JSON 字段
 - tag：只能是 追问、回扣、反差、澄清、风险
 - question：一句可直接问出口的问题，不超过 46 个中文字符
 - why：为什么值得问，不超过 80 个中文字符
-- basedOn：依据来自哪句或哪组信息，不超过 90 个中文字符`;
+- basedOn：引用支持问题的具体原话或两处信息，不超过 120 个中文字符
+- confidence：0-100，表示转写与证据可靠度
+- candidateScore：0-100，表示这个候选的综合价值`;
 
 const CONVERSATION_MEMORY_PROMPT = `你是一位实时采访的对话记忆整理助手。基于旧记忆和新转写，维护一份供主持人追问使用的长期记忆。
 
 ## 只保留
 1. 角色明确说过的关键事实、经历、观点和数据
 2. 时间线、因果链、立场变化、尚未展开的线索
-3. 主持人已经问过的问题和嘉宾尚未回答清楚的点
-4. 前后可能矛盾的说法，但必须标注为“待核对”而不是直接下结论
+3. 已经问过且已回答的问题、已经问过但尚未回答清楚的问题
+4. 可在后面回扣的人物、术语、承诺、案例和未展开线索
+5. 前后可能矛盾的说法，但必须标注为“待核对”而不是直接下结论
 
 ## 禁止
 1. 编造转写里没有的人名、数据、动机或因果
@@ -285,7 +337,7 @@ const CONVERSATION_MEMORY_PROMPT = `你是一位实时采访的对话记忆整�
 3. 逐句复述原文
 
 ## 输出
-直接输出中文要点，最多 1200 个汉字。按“已知事实 / 线索与变化 / 待追问或待核对”组织；没有内容的栏目省略。`;
+直接输出中文要点，最多 3000 个汉字。按“当前主题 / 已知事实与证据 / 已问已答 / 未回答与可回扣线索 / 待核对 / 关键术语”组织；没有内容的栏目省略。`;
 
 function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   let systemPrompt;
@@ -298,6 +350,12 @@ function getSystemPrompt(sceneMode, customPrompt, scriptContent) {
   if (scriptContent && scriptContent.trim().length > 0) {
     systemPrompt += `\n\n## 上传资料\n${scriptContent.substring(0, 3000)}`;
   }
+
+  systemPrompt += `\n\n## 通用质量规则
+1. 不得重复或轻微改写已经展示、已经问过的问题
+2. 只围绕最近新增表达产生新信息；没有新增价值时输出 NO_NEW_QUESTION
+3. ASR 可能误识别英文术语、产品名和人名。语义不通或只出现一次的词不得当作事实前提
+4. 对话中的角色标签优先于猜测；角色不明时避免把某句话强行归给主持人、嘉宾、客户或候选人`;
 
   return systemPrompt;
 }
@@ -317,12 +375,22 @@ function getSpeakerGuidance(sceneMode) {
   return guidance[sceneMode] || '如果对话内容包含角色或说话人前缀，请利用这些前缀判断谁在表达观点、谁在提问。';
 }
 
-function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
+function formatQuestionHistory(questionHistory = []) {
+  if (!Array.isArray(questionHistory) || questionHistory.length === 0) return '无';
+  return questionHistory
+    .slice(-60)
+    .map((item, index) => `${index + 1}. [${item.status === 'asked' ? '已问' : '已展示'}] ${String(item.text || item.question || '').slice(0, 100)}`)
+    .filter(line => !line.endsWith('] '))
+    .join('\n') || '无';
+}
+
+function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode, questionHistory = []) {
   let userPrompt = '';
   if (previousSummary) {
     userPrompt += `## 较早对话记忆\n${previousSummary}\n\n`;
   }
   userPrompt += `## 发言人使用规则\n${getSpeakerGuidance(sceneMode)}\n\n`;
+  userPrompt += `## 已经展示或问过的问题\n${formatQuestionHistory(questionHistory)}\n\n`;
   userPrompt += `## 最近的对话内容\n${transcript.slice(-SUGGESTION_CONTEXT_CHARS)}`;
 
   if (sceneMode === 'sales-negotiation') {
@@ -336,6 +404,8 @@ function buildSuggestionUserPrompt(transcript, previousSummary, sceneMode) {
   } else {
     userPrompt += '\n\n请生成 2-3 条追问建议。';
   }
+
+  userPrompt += '\n如果没有区别于历史问题、且能带来新信息的内容，只输出 NO_NEW_QUESTION。';
 
   return userPrompt;
 }
@@ -424,6 +494,18 @@ function sanitizeSuggestions(content, sceneMode, context = {}) {
     .join('\n');
 }
 
+function filterNovelSuggestionContent(content, questionHistory = []) {
+  const lines = String(content || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line && !/^\[?NO_NEW_QUESTION\]?$/i.test(line));
+  return filterNovelItems(
+    lines,
+    questionHistory,
+    line => line.replace(/^\d+[\.、\)]\s*/, '')
+  ).join('\n');
+}
+
 function sanitizeJudgingScore(content) {
   return (content || '')
     .replace(/^(好的|好|当然|以下是|作为评审助理)[^\n]*\n+/i, '')
@@ -455,12 +537,24 @@ function formatDeepRoundList(rounds) {
     .join('\n');
 }
 
-function buildDeepSuggestionUserPrompt({ sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, conversationMemory, triggerType }) {
+function buildDeepSuggestionUserPrompt({
+  sceneMode,
+  scriptContent,
+  completedRound,
+  sameSpeakerHistory,
+  recentRounds,
+  conversationMemory,
+  questionHistory,
+  contextAgeMs,
+  triggerType
+}) {
   let prompt = `## 场景规则\n${getDeepSceneGuidance(sceneMode)}\n\n`;
   prompt += `## 触发方式\n${triggerType === 'auto' ? '自动深度追问' : '手动深度追问'}\n\n`;
+  prompt += `## 上下文新鲜度\n距最近完整表达约 ${Math.max(0, Math.round((Number(contextAgeMs) || 0) / 1000))} 秒\n\n`;
   if (conversationMemory) {
     prompt += `## 较早对话记忆\n${conversationMemory.slice(-MEMORY_MAX_CHARS)}\n\n`;
   }
+  prompt += `## 已经展示或问过的问题\n${formatQuestionHistory(questionHistory)}\n\n`;
   prompt += `## 最近完成的一轮表达\n${formatDeepRound(completedRound)}\n\n`;
   prompt += `## 同一说话人前文\n${formatDeepRoundList(sameSpeakerHistory)}\n\n`;
   prompt += `## 最近其他轮次\n${formatDeepRoundList(recentRounds)}\n\n`;
@@ -473,7 +567,7 @@ function buildDeepSuggestionUserPrompt({ sceneMode, scriptContent, completedRoun
     prompt += `## 上传资料\n${scriptContent.substring(0, 2500)}\n\n`;
   }
 
-  prompt += '请输出 JSON 数组。';
+  prompt += '请先比较候选质量，再输出最多 3 个 JSON 候选；没有合格候选就输出 []。';
   return prompt;
 }
 
@@ -499,37 +593,106 @@ function parseJsonArray(content) {
   return [];
 }
 
-function normalizeDeepSuggestions(items, rawContent = '') {
+function normalizeDeepSuggestions(items, questionHistory = []) {
   const normalized = (Array.isArray(items) ? items : [])
     .map(item => ({
       tag: String(item?.tag || '').replace(/[\[\]]/g, '').trim(),
       question: String(item?.question || '').trim(),
       why: String(item?.why || '').trim(),
-      basedOn: String(item?.basedOn || item?.based_on || '').trim()
+      basedOn: String(item?.basedOn || item?.based_on || '').trim(),
+      confidence: Number(item?.confidence),
+      candidateScore: Number(item?.candidateScore ?? item?.candidate_score)
     }))
-    .filter(item => item.question)
+    .filter(item => item.question && item.why && item.basedOn)
+    .filter(item => /[？?]$/.test(item.question))
+    .filter(item => !/(多少字|几个模块|多少内容|文档多大|文件多大|一共几页)/.test(item.question))
+    .filter(item => !Number.isFinite(item.confidence) || item.confidence >= 55)
     .map(item => ({
       tag: DEEP_ALLOWED_TAGS.has(item.tag) ? item.tag : '追问',
       question: item.question.slice(0, 80),
       why: item.why.slice(0, 120),
-      basedOn: item.basedOn.slice(0, 140)
-    }))
-    .slice(0, 3);
+      basedOn: item.basedOn.slice(0, 160),
+      confidence: Number.isFinite(item.confidence) ? Math.max(0, Math.min(100, item.confidence)) : null,
+      candidateScore: Number.isFinite(item.candidateScore) ? Math.max(0, Math.min(100, item.candidateScore)) : null
+    }));
 
-  if (normalized.length > 0) return normalized;
+  return filterNovelItems(normalized, questionHistory, item => item.question).slice(0, 2);
+}
 
-  const fallbackLine = (rawContent || '')
-    .split('\n')
-    .map(line => line.replace(/^[-*\d\.\、\)\s]+/, '').trim())
-    .find(Boolean);
-  if (!fallbackLine) return [];
+function hasDualEvidence(candidate) {
+  const evidence = candidate.basedOn || '';
+  const quotedFragments = evidence
+    .split(/[“”"；;]/)
+    .map(fragment => fragment.trim())
+    .filter(fragment => fragment.length >= 5);
+  return quotedFragments.length >= 2
+    || /(?:此前|前面|先前).*(?:本轮|后来|现在|这次)/.test(evidence)
+    || /(?:但|却|然而|同时|另一方面)/.test(evidence);
+}
 
-  return [{
-    tag: '追问',
-    question: fallbackLine.replace(/^(\[[^\]]+\])\s*/, '').slice(0, 80),
-    why: '模型未返回结构化结果，已按第一条内容降级展示',
-    basedOn: '最近一轮完整表达'
-  }];
+function findUncorroboratedTechnicalTerm(candidate, context = {}) {
+  const commonTerms = new Set(['ai', 'asr', 'api', 'llm', 'jd', 'star', 'batna', 'zopa', 'crm', 'saas']);
+  const terms = [...new Set((candidate.question.match(/\b[a-z][a-z0-9._-]{2,}\b/gi) || [])
+    .map(term => term.toLowerCase())
+    .filter(term => !commonTerms.has(term)))];
+  if (terms.length === 0) return '';
+
+  const evidenceText = [
+    context.completedRound?.text,
+    ...(context.sameSpeakerHistory || []).map(round => round.text),
+    ...(context.recentRounds || []).map(round => round.text),
+    context.scriptContent
+  ].filter(Boolean).join(' ').toLowerCase();
+  const materialText = String(context.scriptContent || '').toLowerCase();
+
+  return terms.find(term => {
+    if (materialText.includes(term)) return false;
+    return evidenceText.split(term).length - 1 < 2;
+  }) || '';
+}
+
+function selectDeepCandidate(candidates, context) {
+  const metrics = candidates.map((candidate, index) => {
+    const rejectReasons = [];
+    const candidateScore = candidate.candidateScore === null ? NaN : Number(candidate.candidateScore);
+    const confidence = candidate.confidence === null ? NaN : Number(candidate.confidence);
+    const uncertainTerm = findUncorroboratedTechnicalTerm(candidate, context);
+
+    if (!Number.isFinite(candidateScore) || candidateScore < DEEP_MIN_SCORE) {
+      rejectReasons.push('候选价值分不足');
+    }
+    if (!Number.isFinite(confidence) || confidence < DEEP_MIN_CONFIDENCE) {
+      rejectReasons.push('转写或证据置信度不足');
+    }
+    if (candidate.basedOn.length < 12) rejectReasons.push('依据过短');
+    if (['回扣', '反差', '风险'].includes(candidate.tag) && !hasDualEvidence(candidate)) {
+      rejectReasons.push('标签缺少两处证据');
+    }
+    if (/(能展开说说|能具体说说|能介绍一下|你怎么看(?:这件事)?|可以举个例子吗)/.test(candidate.question)) {
+      rejectReasons.push('问题过于泛化');
+    }
+    if (uncertainTerm) rejectReasons.push(`术语 ${uncertainTerm} 缺少交叉印证`);
+
+    const gateScore = Number.isFinite(candidateScore) && Number.isFinite(confidence)
+      ? Math.round(candidateScore * 0.72 + confidence * 0.28)
+      : 0;
+    return {
+      index,
+      candidateScore: Number.isFinite(candidateScore) ? candidateScore : null,
+      confidence: Number.isFinite(confidence) ? confidence : null,
+      gateScore,
+      rejectReasons
+    };
+  });
+
+  const selectedMetric = metrics
+    .filter(metric => metric.rejectReasons.length === 0)
+    .sort((left, right) => right.gateScore - left.gateScore)[0] || null;
+  return {
+    candidate: selectedMetric ? candidates[selectedMetric.index] : null,
+    metric: selectedMetric,
+    metrics
+  };
 }
 
 function buildConversationMemoryUserPrompt(sceneMode, previousMemory, transcriptChunk) {
@@ -549,20 +712,44 @@ function sanitizeConversationMemory(content) {
     .slice(-MEMORY_MAX_CHARS);
 }
 
-async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
-  const response = await fetch(LLM_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${LLM_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      messages,
-      temperature,
-      max_tokens: maxTokens
-    })
-  });
+async function callLlm(messages, {
+  temperature = 0.7,
+  maxTokens = 300,
+  model = LLM_MODEL,
+  requestType = 'general',
+  timeoutMs = LLM_TIMEOUT_MS
+} = {}) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+
+  try {
+    response = await fetch(LLM_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LLM_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens
+      })
+    });
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const timeoutError = new Error(`LLM 请求超时（${Math.round(timeoutMs / 1000)} 秒）`);
+      timeoutError.status = 504;
+      timeoutError.detail = `provider=${LLM_PROVIDER_HOST}; requestType=${requestType}`;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const errText = await response.text();
@@ -572,12 +759,105 @@ async function callLlm(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
     throw err;
   }
 
-  return response.json();
+  const data = await response.json();
+  const choice = data.choices?.[0] || {};
+  data._diagnostics = {
+    requestType,
+    provider: LLM_PROVIDER_HOST,
+    requestedModel: model,
+    returnedModel: data.model || '',
+    durationMs: Date.now() - startedAt,
+    finishReason: choice.finish_reason || '',
+    maxTokens,
+    usage: data.usage || null,
+    requestId: response.headers.get('x-request-id') || response.headers.get('request-id') || ''
+  };
+  return data;
+}
+
+function sanitizeExportRecap(content) {
+  return (content || '')
+    .replace(/^好的[，,。\s]*/g, '')
+    .replace(/^以下是[^。\n]*[。\n]*/g, '')
+    .trim();
+}
+
+function sanitizeZipBaseName(name) {
+  const cleaned = String(name || '把天聊下去-复盘包')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 120);
+  return cleaned || '把天聊下去-复盘包';
+}
+
+function formatExportSuggestionGroups(groups = []) {
+  return groups
+    .slice(-80)
+    .map(group => {
+      const title = group.title || group.type || 'AI 输出';
+      const header = `【${title}｜${group.createdAt || ''}｜${group.sceneLabel || group.sceneMode || ''}】`;
+      const items = (group.items || [])
+        .slice(0, 12)
+        .map(item => {
+          const tag = item.tag ? `[${item.tag}] ` : '';
+          const text = item.text || item.question || '';
+          const detail = item.detail || item.basedOn || item.why || '';
+          const used = item.used ? '（已标记使用）' : '';
+          return `- ${tag}${text}${used}${detail ? `\n  依据：${detail}` : ''}`;
+        })
+        .join('\n');
+      const raw = group.rawText && (!items || ['review', 'score'].includes(group.type))
+        ? `\n原文：\n${String(group.rawText).slice(0, 2500)}`
+        : '';
+      return `${header}\n${items || '（无结构化条目）'}${raw}`;
+    })
+    .join('\n\n');
+}
+
+function buildExportRecapUserPrompt(payload = {}) {
+  const session = payload.session || {};
+  const transcript = payload.transcript?.text || payload.transcript || '';
+  const groupsText = formatExportSuggestionGroups(payload.suggestionGroups || []);
+  const scriptContent = payload.scriptContent || '';
+  const scriptMeta = session.uploadedMaterial || payload.scriptMeta || null;
+  const conversationMemory = payload.conversationMemory || '';
+
+  let prompt = `## 会话信息
+- 场景：${session.sceneLabel || session.sceneMode || '未知'}
+- 时长：${session.durationText || ''}
+- AI 输出数量：${session.suggestionCount || 0}
+- 转写字数：${session.transcriptCharCount || 0}
+`;
+
+  if (scriptMeta?.filename) {
+    prompt += `- 上传资料：${scriptMeta.filename}（${scriptMeta.charCount || 0} 字）\n`;
+  }
+
+  if (conversationMemory) {
+    prompt += `\n## 长对话记忆（覆盖较早内容）\n${String(conversationMemory).slice(-MEMORY_MAX_CHARS)}\n`;
+  }
+
+  if (groupsText) {
+    prompt += `\n## AI 输出卡片（主要依据）\n${groupsText.slice(-14000)}\n`;
+  }
+
+  if (transcript) {
+    prompt += `\n## 完整转写（辅助依据，优先看最近内容）\n${String(transcript).slice(-20000)}\n`;
+  }
+
+  if (scriptContent) {
+    prompt += `\n## 上传资料（仅供背景参考，不要复述）\n${String(scriptContent).slice(0, 5000)}\n`;
+  }
+
+  prompt += '\n请生成会后复盘整理。';
+  return prompt;
 }
 
 // ── LLM 追问生成 API ─────────────────────────────────────
 app.post('/api/generate-suggestions', async (req, res) => {
-  const { transcript, scriptContent, previousSummary, sceneMode, customPrompt } = req.body;
+  const { transcript, scriptContent, previousSummary, questionHistory = [], sceneMode, customPrompt } = req.body;
 
   if (!transcript || transcript.trim().length === 0) {
     return res.status(400).json({ error: '对话内容为空' });
@@ -590,24 +870,26 @@ app.post('/api/generate-suggestions', async (req, res) => {
   }
 
   const systemPrompt = getSystemPrompt(sceneMode, customPrompt, scriptContent);
-  const userPrompt = buildSuggestionUserPrompt(transcript, previousSummary, sceneMode);
+  const userPrompt = buildSuggestionUserPrompt(transcript, previousSummary, sceneMode, questionHistory);
 
   try {
     const data = await callLlm([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ]);
-    const content = sanitizeSuggestions(data.choices?.[0]?.message?.content || '', sceneMode, {
+    ], { model: LLM_MODEL_FAST, requestType: 'suggestions' });
+    const sanitizedContent = sanitizeSuggestions(data.choices?.[0]?.message?.content || '', sceneMode, {
       scriptContent,
       transcript
     });
+    const content = filterNovelSuggestionContent(sanitizedContent, questionHistory);
     console.log(`💡 生成追问建议:\n${content}`);
 
     res.json({
       success: true,
       suggestions: content,
-      model: data.model || LLM_MODEL,
-      usage: data.usage
+      model: data.model || LLM_MODEL_FAST,
+      usage: data.usage,
+      diagnostics: data._diagnostics
     });
   } catch (err) {
     if (err.status) {
@@ -644,14 +926,15 @@ app.post('/api/conversation-memory', async (req, res) => {
     const data = await callLlm([
       { role: 'system', content: CONVERSATION_MEMORY_PROMPT },
       { role: 'user', content: buildConversationMemoryUserPrompt(sceneMode, previousMemory, transcriptChunk) }
-    ], { temperature: 0.2, maxTokens: 900 });
+    ], { temperature: 0.2, maxTokens: 1500, model: LLM_MODEL_FAST, requestType: 'conversation-memory' });
     const memory = sanitizeConversationMemory(data.choices?.[0]?.message?.content || '');
 
     res.json({
       success: true,
       memory,
-      model: data.model || LLM_MODEL,
-      usage: data.usage
+      model: data.model || LLM_MODEL_FAST,
+      usage: data.usage,
+      diagnostics: data._diagnostics
     });
   } catch (err) {
     if (err.status) {
@@ -665,7 +948,18 @@ app.post('/api/conversation-memory', async (req, res) => {
 
 // ── 深度追问 API ─────────────────────────────────────────
 app.post('/api/deep-suggestions', async (req, res) => {
-  const { sceneMode, scriptContent, completedRound, sameSpeakerHistory, recentRounds, conversationMemory, triggerType } = req.body;
+  const {
+    sceneMode,
+    scriptContent,
+    completedRound,
+    sameSpeakerHistory,
+    recentRounds,
+    conversationMemory,
+    questionHistory = [],
+    contextAgeMs = 0,
+    allowStaleContext = false,
+    triggerType
+  } = req.body;
 
   if (!DEEP_SUPPORTED_SCENES.has(sceneMode)) {
     return res.status(400).json({ error: '当前场景不支持深度追问' });
@@ -673,6 +967,13 @@ app.post('/api/deep-suggestions', async (req, res) => {
 
   if (!completedRound || !completedRound.text || completedRound.text.trim().length === 0) {
     return res.status(400).json({ error: '缺少完整表达内容' });
+  }
+
+  if (Number(contextAgeMs) > DEEP_CONTEXT_MAX_AGE_MS && !allowStaleContext) {
+    return res.status(409).json({
+      error: '最近转写已经过期，请继续录音后再生成深度追问',
+      contextAgeMs: Number(contextAgeMs)
+    });
   }
 
   if (!keyConfigured) {
@@ -688,23 +989,76 @@ app.post('/api/deep-suggestions', async (req, res) => {
     sameSpeakerHistory,
     recentRounds,
     conversationMemory,
+    questionHistory,
+    contextAgeMs,
     triggerType
   });
 
   try {
-    const data = await callLlm([
+    const candidateData = await callLlm([
       { role: 'system', content: DEEP_SUGGESTION_PROMPT },
       { role: 'user', content: userPrompt }
-    ], { temperature: 0.35, maxTokens: 700 });
-    const rawContent = data.choices?.[0]?.message?.content || '';
-    const suggestions = normalizeDeepSuggestions(parseJsonArray(rawContent), rawContent);
-    console.log('🔎 生成深度追问:', suggestions);
+    ], {
+      temperature: 0.3,
+      maxTokens: 700,
+      model: LLM_MODEL_DEEP,
+      requestType: 'deep-candidates'
+    });
+    const rawContent = candidateData.choices?.[0]?.message?.content || '';
+    const candidates = normalizeDeepSuggestions(parseJsonArray(rawContent), questionHistory);
+
+    if (candidates.length === 0) {
+      return res.json({
+        success: true,
+        suggestions: [],
+        reason: '当前没有证据充分且不重复的深度问题',
+        model: candidateData.model || LLM_MODEL_DEEP,
+        usage: candidateData.usage,
+        diagnostics: {
+          candidate: candidateData._diagnostics,
+          selectionMode: 'deterministic-quality-gate',
+          candidateCount: 0,
+          selectedScore: null
+        }
+      });
+    }
+
+    const selection = selectDeepCandidate(candidates, {
+      completedRound,
+      sameSpeakerHistory,
+      recentRounds,
+      scriptContent
+    });
+    const suggestions = selection.candidate
+      ? [{
+        ...selection.candidate,
+        selectionScore: selection.metric.gateScore,
+        selectionReason: `应用端质量门槛：候选分 ${selection.metric.candidateScore}，证据置信度 ${selection.metric.confidence}`
+      }]
+      : [];
+    console.log('🔎 深度追问筛选:', {
+      candidateCount: candidates.length,
+      selectedIndex: selection.metric?.index ?? -1,
+      selectedScore: selection.metric?.gateScore ?? null
+    });
 
     res.json({
       success: true,
       suggestions,
-      model: data.model || LLM_MODEL,
-      usage: data.usage
+      reason: suggestions.length > 0 ? '' : '候选问题未达到深度质量门槛',
+      model: candidateData.model || LLM_MODEL_DEEP,
+      usage: candidateData.usage || null,
+      diagnostics: {
+        candidate: candidateData._diagnostics,
+        selectionMode: 'deterministic-quality-gate',
+        candidateCount: candidates.length,
+        candidateMetrics: selection.metrics,
+        selectedIndex: selection.metric?.index ?? -1,
+        selectedScore: selection.metric?.gateScore ?? null,
+        selectionReason: selection.metric
+          ? `候选分 ${selection.metric.candidateScore}，证据置信度 ${selection.metric.confidence}`
+          : '没有候选通过应用端质量门槛'
+      }
     });
   } catch (err) {
     if (err.status) {
@@ -744,15 +1098,21 @@ app.post('/api/interview-review', async (req, res) => {
     const data = await callLlm([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ], { temperature: 0.4, maxTokens: 900 });
+    ], {
+      temperature: 0.4,
+      maxTokens: 1400,
+      model: LLM_MODEL_RECAP,
+      requestType: 'interview-review'
+    });
     const content = data.choices?.[0]?.message?.content || '';
     console.log(`🧭 生成面试复盘:\n${content}`);
 
     res.json({
       success: true,
       review: content,
-      model: data.model || LLM_MODEL,
-      usage: data.usage
+      model: data.model || LLM_MODEL_RECAP,
+      usage: data.usage,
+      diagnostics: data._diagnostics
     });
   } catch (err) {
     if (err.status) {
@@ -792,15 +1152,21 @@ app.post('/api/judging-score', async (req, res) => {
     const data = await callLlm([
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
-    ], { temperature: 0.35, maxTokens: 1200 });
+    ], {
+      temperature: 0.35,
+      maxTokens: 1600,
+      model: LLM_MODEL_RECAP,
+      requestType: 'judging-score'
+    });
     const content = sanitizeJudgingScore(data.choices?.[0]?.message?.content || '');
     console.log(`🏁 生成评审评分表:\n${content}`);
 
     res.json({
       success: true,
       score: content,
-      model: data.model || LLM_MODEL,
-      usage: data.usage
+      model: data.model || LLM_MODEL_RECAP,
+      usage: data.usage,
+      diagnostics: data._diagnostics
     });
   } catch (err) {
     if (err.status) {
@@ -815,13 +1181,136 @@ app.post('/api/judging-score', async (req, res) => {
   }
 });
 
+// ── 会后复盘导出：AI 整理 ─────────────────────────────────
+app.post('/api/export-recap', async (req, res) => {
+  const payload = req.body || {};
+  const transcriptText = payload.transcript?.text || payload.transcript || '';
+  const suggestionGroups = Array.isArray(payload.suggestionGroups) ? payload.suggestionGroups : [];
+
+  if (!transcriptText.trim() && suggestionGroups.length === 0) {
+    return res.status(400).json({ error: '没有可整理的会话内容' });
+  }
+
+  if (!keyConfigured) {
+    return res.status(500).json({
+      error: 'API Key 未配置。请编辑项目根目录的 .env 文件，填入你的 LLM_API_KEY'
+    });
+  }
+
+  try {
+    const recapMessages = [
+      { role: 'system', content: EXPORT_RECAP_PROMPT },
+      { role: 'user', content: buildExportRecapUserPrompt(payload) }
+    ];
+    const initialData = await callLlm(recapMessages, {
+      temperature: 0.3,
+      maxTokens: 2600,
+      model: LLM_MODEL_RECAP,
+      requestType: 'export-recap'
+    });
+    const initialContent = initialData.choices?.[0]?.message?.content || '';
+    let recap = sanitizeExportRecap(initialContent);
+    let continuationData = null;
+    const initialFinishReason = initialData._diagnostics?.finishReason || '';
+
+    if (['length', 'max_tokens'].includes(initialFinishReason)) {
+      continuationData = await callLlm([
+        ...recapMessages,
+        { role: 'assistant', content: initialContent },
+        {
+          role: 'user',
+          content: '刚才的输出因长度中断。只续写尚未完成的固定结构，不要重复已有标题或内容；直接从断点继续。'
+        }
+      ], {
+        temperature: 0.2,
+        maxTokens: 1600,
+        model: LLM_MODEL_RECAP,
+        requestType: 'export-recap-continuation'
+      });
+      const continuation = sanitizeExportRecap(continuationData.choices?.[0]?.message?.content || '');
+      if (continuation) recap = `${recap}\n${continuation}`.trim();
+    }
+
+    res.json({
+      success: true,
+      recap,
+      model: continuationData?.model || initialData.model || LLM_MODEL_RECAP,
+      usage: {
+        initial: initialData.usage || null,
+        continuation: continuationData?.usage || null
+      },
+      diagnostics: {
+        calls: [initialData._diagnostics, continuationData?._diagnostics].filter(Boolean),
+        truncatedInitially: ['length', 'max_tokens'].includes(initialFinishReason),
+        continued: !!continuationData,
+        finalFinishReason: continuationData?._diagnostics?.finishReason || initialFinishReason
+      }
+    });
+  } catch (err) {
+    if (err.status) {
+      console.error('导出整理 API 错误:', err.status, err.detail);
+      return res.status(err.status).json({
+        error: err.message,
+        detail: err.detail
+      });
+    }
+    console.error('导出整理调用异常:', err.message);
+    res.status(500).json({ error: '生成会后整理失败: ' + err.message });
+  }
+});
+
+// ── 会后复盘导出：ZIP 打包 ────────────────────────────────
+app.post('/api/export-package', async (req, res) => {
+  const { baseName, markdown, json } = req.body || {};
+
+  if (!markdown || typeof markdown !== 'string') {
+    return res.status(400).json({ error: '缺少 Markdown 内容' });
+  }
+
+  if (json === undefined || json === null) {
+    return res.status(400).json({ error: '缺少 JSON 内容' });
+  }
+
+  const safeBaseName = sanitizeZipBaseName(baseName);
+  const jsonText = typeof json === 'string' ? json : JSON.stringify(json, null, 2);
+
+  try {
+    const zip = new JSZip();
+    zip.file('review.md', markdown);
+    zip.file('data.json', jsonText);
+
+    const buffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename*=UTF-8''${encodeURIComponent(`${safeBaseName}.zip`)}`
+    );
+    res.send(buffer);
+  } catch (err) {
+    console.error('导出 ZIP 失败:', err.message);
+    res.status(500).json({ error: '导出 ZIP 失败: ' + err.message });
+  }
+});
+
 // ── 获取当前配置（前端读取用，不暴露 key）────────────────────
 app.get('/api/config', (req, res) => {
   res.json({
     silenceThreshold: SILENCE_THRESHOLD,
     minInterval: MIN_INTERVAL,
     minTextLength: MIN_TEXT_LENGTH,
-    model: LLM_MODEL,
+    model: LLM_MODEL_FAST,
+    models: {
+      fast: LLM_MODEL_FAST,
+      deep: LLM_MODEL_DEEP,
+      recap: LLM_MODEL_RECAP
+    },
+    llmProvider: LLM_PROVIDER_HOST,
+    llmTimeoutMs: LLM_TIMEOUT_MS,
     hasApiKey: keyConfigured,
     hasAsrConfig: asrConfigured,
     longContextMemoryEnabled: LONG_CONTEXT_MEMORY_ENABLED
@@ -977,9 +1466,33 @@ wss.on('connection', (clientWs) => {
   let volcConnected = false;
   let initSent = false;
   let audioQueue = []; // 缓冲连接建立前的音频
+  let shouldStream = false;
+  let lastAudioAt = 0;
+  let reconnectTimer = null;
+  let reconnectAttempts = 0;
+  let audioLogCount = 0;
+
+  function canReconnect() {
+    return shouldStream
+      && clientWs.readyState === WebSocket.OPEN
+      && Date.now() - lastAudioAt < 8000;
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer || !canReconnect() || reconnectAttempts >= 3) return;
+    reconnectAttempts++;
+    console.log(`[ASR ${connId}] 自动重连火山引擎（${reconnectAttempts}/3）...`);
+    clientWs.send(JSON.stringify({ type: 'reconnecting' }));
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (canReconnect()) connectVolcengine();
+    }, 300);
+  }
 
   // ── 连接火山引擎 ────────────────────────────────────────
   function connectVolcengine() {
+    if (!shouldStream) return;
+    if (volcWs && [WebSocket.CONNECTING, WebSocket.OPEN].includes(volcWs.readyState)) return;
     if (!asrConfigured) {
       clientWs.send(JSON.stringify({
         type: 'error',
@@ -998,9 +1511,15 @@ wss.on('connection', (clientWs) => {
 
     console.log(`[ASR ${connId}] 正在连接火山引擎... (connect-id: ${connectId})`);
 
-    volcWs = new WebSocket(ASR_WSS_ENDPOINT, { headers });
+    const socket = new WebSocket(ASR_WSS_ENDPOINT, { headers });
+    let terminalErrorSeen = false;
+    volcWs = socket;
 
-    volcWs.on('open', () => {
+    socket.on('open', () => {
+      if (!shouldStream) {
+        socket.close();
+        return;
+      }
       volcConnected = true;
       console.log(`[ASR ${connId}] 火山引擎连接成功`);
 
@@ -1029,7 +1548,7 @@ wss.on('connection', (clientWs) => {
       const initFrame = buildFullClientRequest(initPayload);
       console.log(`[ASR ${connId}] 初始化帧: ${initFrame.length} bytes, header: ${initFrame.slice(0, 8).toString('hex')}`);
       console.log(`[ASR ${connId}] 初始化 JSON: ${JSON.stringify(initPayload)}`);
-      volcWs.send(initFrame);
+      socket.send(initFrame);
       initSent = true;
       console.log(`[ASR ${connId}] 已发送初始化配置`);
 
@@ -1040,11 +1559,11 @@ wss.on('connection', (clientWs) => {
       while (audioQueue.length > 0) {
         const chunk = audioQueue.shift();
         const frame = buildAudioFrame(chunk);
-        volcWs.send(frame);
+        socket.send(frame);
       }
     });
 
-    volcWs.on('message', (data) => {
+    socket.on('message', (data) => {
       const parsed = parseServerResponse(data);
 
       if (parsed.type === 'result') {
@@ -1078,15 +1597,20 @@ wss.on('connection', (clientWs) => {
       } else if (parsed.type === 'ack') {
         // 服务端确认，无需转发
       } else if (parsed.type === 'error') {
+        if (terminalErrorSeen) return;
         console.error(`[ASR ${connId}] 火山引擎错误:`, parsed.message);
         clientWs.send(JSON.stringify({
           type: 'error',
           message: parsed.message
         }));
+        if (/(session has ended|waiting next packet timeout)/i.test(parsed.message)) {
+          terminalErrorSeen = true;
+          socket.close();
+        }
       }
     });
 
-    volcWs.on('error', (err) => {
+    socket.on('error', (err) => {
       console.error(`[ASR ${connId}] 火山引擎 WS 错误:`, err.message);
       clientWs.send(JSON.stringify({
         type: 'error',
@@ -1094,20 +1618,14 @@ wss.on('connection', (clientWs) => {
       }));
     });
 
-    volcWs.on('close', (code, reason) => {
-      volcConnected = false;
-      initSent = false;
-      console.log(`[ASR ${connId}] 火山引擎连接关闭 (code: ${code})`);
-      // nostream 模式下每段话处理完会自动关闭，需要自动重连
-      if (clientWs.readyState === WebSocket.OPEN) {
-        console.log(`[ASR ${connId}] 自动重连火山引擎...`);
-        clientWs.send(JSON.stringify({ type: 'reconnecting' }));
-        setTimeout(() => {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            connectVolcengine();
-          }
-        }, 300);
+    socket.on('close', (code) => {
+      if (volcWs === socket) {
+        volcConnected = false;
+        initSent = false;
       }
+      console.log(`[ASR ${connId}] 火山引擎连接关闭 (code: ${code})`);
+      // nostream 模式下每段话结束会关闭；仅在仍录音且刚收到音频时重连。
+      scheduleReconnect();
     });
   }
 
@@ -1115,19 +1633,22 @@ wss.on('connection', (clientWs) => {
   clientWs.on('message', (data, isBinary) => {
     if (isBinary) {
       // 二进制数据 = 音频 PCM
+      if (!shouldStream) return;
       const audioBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      lastAudioAt = Date.now();
 
       if (volcWs && volcConnected && initSent) {
         const frame = buildAudioFrame(audioBuffer);
-        if (!this._audioLogCount) this._audioLogCount = 0;
-        this._audioLogCount++;
-        if (this._audioLogCount <= 5) {
-          console.log(`[ASR ${connId}] 发送音频帧 #${this._audioLogCount}: pcm=${audioBuffer.length}bytes, frame=${frame.length}bytes, header=${frame.slice(0,8).toString('hex')}`);
+        audioLogCount++;
+        reconnectAttempts = 0;
+        if (audioLogCount <= 5) {
+          console.log(`[ASR ${connId}] 发送音频帧 #${audioLogCount}: pcm=${audioBuffer.length}bytes, frame=${frame.length}bytes, header=${frame.slice(0,8).toString('hex')}`);
         }
         volcWs.send(frame);
       } else {
         // 连接还没好，先缓存
         audioQueue.push(audioBuffer);
+        if (audioQueue.length > 100) audioQueue.shift();
         console.log(`[ASR ${connId}] 音频缓存中 (volcConnected=${volcConnected}, initSent=${initSent}), queue=${audioQueue.length}`);
       }
     } else {
@@ -1137,11 +1658,21 @@ wss.on('connection', (clientWs) => {
 
         switch (msg.type) {
           case 'start':
+            shouldStream = true;
+            lastAudioAt = Date.now();
+            reconnectAttempts = 0;
+            audioLogCount = 0;
             audioQueue = [];
             connectVolcengine();
             break;
 
           case 'stop':
+            shouldStream = false;
+            audioQueue = [];
+            if (reconnectTimer) {
+              clearTimeout(reconnectTimer);
+              reconnectTimer = null;
+            }
             if (volcWs && volcConnected && initSent) {
               // 发送最后一包空音频（结束信号）
               const endFrame = buildAudioFrame(Buffer.alloc(0), true);
@@ -1168,6 +1699,8 @@ wss.on('connection', (clientWs) => {
   // ── 前端断开 ────────────────────────────────────────────
   clientWs.on('close', () => {
     console.log(`[ASR ${connId}] 前端断开`);
+    shouldStream = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
     if (volcWs && volcWs.readyState === WebSocket.OPEN) {
       volcWs.close();
     }
@@ -1185,7 +1718,8 @@ server.listen(PORT, () => {
   console.log('║          🎙️  把天聊下去 · AI 副驾            ║');
   console.log('╠══════════════════════════════════════════════╣');
   console.log(`║  地址: http://localhost:${PORT}`);
-  console.log(`║  模型: ${LLM_MODEL}`);
+  console.log(`║  模型: 快速 ${LLM_MODEL_FAST} / 深度 ${LLM_MODEL_DEEP}`);
+  console.log(`║  中转: ${LLM_PROVIDER_HOST}`);
   console.log(`║  LLM: ${keyConfigured ? '已配置 ✅' : '未配置 ❌ → 请编辑 .env 文件'}`);
   console.log(`║  ASR: ${asrConfigured ? '豆包 Seed-ASR 2.0 ✅' : '未配置 ❌ → 请编辑 .env 文件'}`);
   console.log(`║  WS:  ws://localhost:${PORT}/asr`);

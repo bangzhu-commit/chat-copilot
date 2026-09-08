@@ -309,6 +309,15 @@ select {
   border-color: rgba(187, 161, 255, 0.5);
 }
 
+.btn-export {
+  color: #b9f5df;
+  border-color: rgba(54, 208, 161, 0.3);
+}
+
+.btn-export:hover {
+  border-color: rgba(54, 208, 161, 0.58);
+}
+
 .btn-deep {
   color: #b7f0ff;
   background: linear-gradient(180deg, rgba(72, 211, 255, 0.12), transparent), #13242b;
@@ -514,6 +523,24 @@ select {
   padding: 0 24px 0 8px;
   font-size: 12px;
   outline: none;
+}
+
+.speaker-role-swap {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(114, 167, 255, 0.34);
+  border-radius: 7px;
+  background: rgba(114, 167, 255, 0.09);
+  color: #a9c8ff;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.speaker-role-swap:hover {
+  border-color: rgba(114, 167, 255, 0.58);
+  background: rgba(114, 167, 255, 0.16);
 }
 
 .badge {

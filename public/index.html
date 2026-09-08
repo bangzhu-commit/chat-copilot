@@ -60,6 +60,9 @@
       <button id="btnJudgingScore" class="btn btn-secondary btn-review" onclick="generateJudgingScore()" style="display: none;">
         生成评分表
       </button>
+      <button id="btnExportReview" class="btn btn-secondary btn-export" onclick="exportReviewPackage('manual')">
+        导出复盘包
+      </button>
     </div>
     <div id="customPromptRow" class="custom-prompt-row" style="display: none;">
       <label for="customPrompt">自定义指令</label>
@@ -122,6 +125,7 @@
     </div>
   </footer>
 
+  <script src="question-quality.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

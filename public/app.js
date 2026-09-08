@@ -23,7 +23,12 @@ let suggestionCount = 0;
 let speakerOrder = [];
 let speakerLabelMap = {};
 let speakerRoleMap = {};
+let speakerRoleSource = {};
 let transcriptTurns = [];
+let suggestionGroups = [];
+let questionLedger = [];
+let questionLedgerCounter = 0;
+let exportGroupCounter = 0;
 let recentTurnKeys = new Map();
 let turnCounter = 0;
 let deepModeEnabled = false;
@@ -40,9 +45,15 @@ let memoryTurnCursor = 0;
 let isMemoryGenerating = false;
 let memoryRetryAfter = 0;
 let conversationMemoryScene = '';
+let sessionStartedAt = null;
+let sessionEndedAt = null;
+let exportPromptedForSession = false;
+let stopExportPromptTimer = null;
+let isExporting = false;
 
 // 上传资料内容
 let scriptContent = '';
+let scriptMeta = null;
 
 const SCENE_UI = {
   'sales-negotiation': {
@@ -100,6 +111,9 @@ const DEEP_SUPPORTED_SCENES = new Set([
 const DEEP_TURN_SILENCE_MS = 4000;
 const DEEP_MIN_TEXT_LENGTH = 60;
 const DEEP_MIN_INTERVAL = 20000;
+const DEEP_CONTEXT_MAX_AGE_MS = 90000;
+const QUESTION_DEDUP_WINDOW_MS = 20 * 60 * 1000;
+const QUESTION_HISTORY_LIMIT = 80;
 const LONG_CONTEXT_SCENES = new Set(['live-host', 'interview']);
 const RECENT_CONTEXT_CHARS = 12000;
 const MEMORY_BATCH_TURNS = 12;
@@ -111,6 +125,8 @@ let appConfig = {
   minInterval: 30000,
   minTextLength: 100,
   model: '',
+  models: {},
+  llmProvider: '',
   hasApiKey: false,
   hasAsrConfig: false,
   longContextMemoryEnabled: true
@@ -140,6 +156,7 @@ const $btnDeepTrigger = document.getElementById('btnDeepTrigger');
 const $btnDeepAuto = document.getElementById('btnDeepAuto');
 const $btnInterviewReview = document.getElementById('btnInterviewReview');
 const $btnJudgingScore = document.getElementById('btnJudgingScore');
+const $btnExportReview = document.getElementById('btnExportReview');
 const $statusDot = document.getElementById('statusDot');
 const $statusText = document.getElementById('statusText');
 const $asrStatus = document.getElementById('asrStatus');
@@ -472,8 +489,57 @@ function normalizeDuplicateText(text) {
   return normalizeTranscriptText(text).replace(/[，。！？；：、,.!?;:\s"“”'‘’]/g, '');
 }
 
+function getActiveQuestionHistory() {
+  const now = Date.now();
+  return questionLedger
+    .filter(item => item.sceneMode === $sceneMode.value)
+    .filter(item => item.used || now - Date.parse(item.createdAt) <= QUESTION_DEDUP_WINDOW_MS)
+    .slice(-QUESTION_HISTORY_LIMIT);
+}
+
+function serializeQuestionHistory() {
+  return getActiveQuestionHistory().map(item => ({
+    text: item.text,
+    type: item.type,
+    status: item.used ? 'asked' : 'shown',
+    createdAt: item.createdAt
+  }));
+}
+
+function filterNovelQuestionItems(items, getText = item => item.text || item.question || '') {
+  const api = window.ChatCopilotQuestionQuality;
+  if (!api?.filterNovelItems) return items;
+  return api.filterNovelItems(items, getActiveQuestionHistory(), getText);
+}
+
+function registerQuestionItem(item, type, createdAt) {
+  const text = item.text || item.question || '';
+  if (!text || !['suggestion', 'deep'].includes(type)) return;
+  const ledgerItem = {
+    id: `question-${++questionLedgerCounter}`,
+    text,
+    type,
+    sceneMode: $sceneMode.value,
+    createdAt: createdAt.toISOString(),
+    used: false
+  };
+  questionLedger.push(ledgerItem);
+  if (questionLedger.length > 240) {
+    questionLedger = questionLedger.slice(-200);
+  }
+  item.ledgerId = ledgerItem.id;
+}
+
+function updateQuestionLedgerUsage(item) {
+  if (!item?.ledgerId) return;
+  const ledgerItem = questionLedger.find(entry => entry.id === item.ledgerId);
+  if (ledgerItem) ledgerItem.used = !!item.used;
+}
+
 function isFillerTurn(text) {
-  return /^(嗯+|啊+|哦+|呃+|额+)$/i.test(text.trim());
+  const compact = normalizeDuplicateText(text).toLowerCase();
+  if (!compact) return true;
+  return /^(?:(?:嗯|啊|哦|呃|额|哎|唉|嗯哼|对|是|好|行|可以|没错)){1,4}$/i.test(compact);
 }
 
 function isRecentDuplicate(turn) {
@@ -547,7 +613,7 @@ function mergeTurnText(previous, next) {
 
 function addCommittedTurn(turn) {
   getSpeakerLabel(turn.speakerId);
-  ensureSpeakerRole(turn.speakerId);
+  ensureSpeakerRole(turn.speakerId, turn.text);
   transcriptTurns.push(turn);
   turn.element = renderTranscriptLine(turn);
   updateSpeakerRoleControls();
@@ -744,7 +810,6 @@ function getSpeakerLabel(speakerId) {
   if (!speakerLabelMap[speakerId]) {
     speakerOrder.push(speakerId);
     speakerLabelMap[speakerId] = `说话人 ${speakerOrder.length}`;
-    ensureSpeakerRole(speakerId);
   }
   return speakerLabelMap[speakerId];
 }
@@ -763,11 +828,73 @@ function formatPromptTranscriptTurn(turn) {
   return `${turn.text}\n`;
 }
 
-function ensureSpeakerRole(speakerId) {
+function ensureSpeakerRole(speakerId, text = '') {
   if (!speakerId || speakerRoleMap[speakerId]) return;
+  const inferredRole = inferSpeakerRole($sceneMode.value, text);
+  if (inferredRole && !isRoleAssignedToOtherSpeaker(inferredRole, speakerId)) {
+    assignSpeakerRole(speakerId, inferredRole, 'auto-content');
+  }
+  assignRemainingRoleIfClear();
+}
+
+function inferSpeakerRole(sceneMode, text) {
+  const value = normalizeTranscriptText(text).toLowerCase();
+  if (!value) return '';
+
+  if (sceneMode === 'live-host') {
+    if (/(欢迎来到|今天.{0,12}嘉宾|请.{0,12}(介绍|分享)|直播间|我是.{0,10}(主持人|主播|帮主))/.test(value)) return '主持人';
+    if (/(大家好.{0,8}我是|我是.{0,20}(创始人|联合创始人|ceo|负责人)|我们(公司|团队|产品))/.test(value)) return '嘉宾';
+  }
+
+  if (sceneMode === 'interview') {
+    if (/(今天我们(采访|聊)|请.{0,12}(介绍|讲讲|分享)|我想问)/.test(value)) return '采访者';
+    if (/(大家好.{0,8}我是|我来自|我的经历|我当时负责)/.test(value)) return '受访者';
+  }
+
+  if (sceneMode === 'recruitment' || sceneMode === 'candidate-interview') {
+    if (/(请.{0,12}(自我介绍|介绍一下|讲讲)|为什么应聘|你在.{0,12}项目)/.test(value)) return '面试官';
+    if (/(我应聘|我在.{0,12}项目|我主要负责|我的优势)/.test(value)) return '候选人';
+  }
+
+  if (sceneMode === 'ai-judge') {
+    if (/(请.{0,12}(介绍|演示|说明)|我想追问|评分)/.test(value)) return '评委';
+    if (/(我们的项目|这个产品解决|我们做了|目前已经上线)/.test(value)) return '选手';
+  }
+
+  if (sceneMode === 'sales-negotiation') {
+    if (/(我们的预算|采购流程|我要和.{0,8}确认|你们的报价)/.test(value)) return '客户';
+    if (/(我们的方案|可以给您|我们产品|下一步我们)/.test(value)) return '我方';
+  }
+
+  return '';
+}
+
+function isRoleAssignedToOtherSpeaker(role, speakerId) {
+  return Object.entries(speakerRoleMap)
+    .some(([id, assignedRole]) => id !== speakerId && assignedRole === role);
+}
+
+function assignSpeakerRole(speakerId, role, source = 'manual') {
+  if (!speakerId) return;
+  if (!role) {
+    delete speakerRoleMap[speakerId];
+    delete speakerRoleSource[speakerId];
+    return;
+  }
+  speakerRoleMap[speakerId] = role;
+  speakerRoleSource[speakerId] = source;
+}
+
+function assignRemainingRoleIfClear() {
   const roles = getSceneRoles();
-  const index = speakerOrder.indexOf(speakerId);
-  speakerRoleMap[speakerId] = roles[index] || '';
+  const visibleSpeakers = speakerOrder.slice(0, 2);
+  if (visibleSpeakers.length !== 2 || roles.length < 2) return;
+
+  const unassignedSpeakers = visibleSpeakers.filter(speakerId => !speakerRoleMap[speakerId]);
+  const unusedRoles = roles.filter(role => !visibleSpeakers.some(speakerId => speakerRoleMap[speakerId] === role));
+  if (unassignedSpeakers.length === 1 && unusedRoles.length === 1) {
+    assignSpeakerRole(unassignedSpeakers[0], unusedRoles[0], 'auto-elimination');
+  }
 }
 
 function getSceneRoles() {
@@ -776,10 +903,19 @@ function getSceneRoles() {
 
 function syncSpeakerRolesWithScene() {
   const roles = getSceneRoles();
-  speakerOrder.forEach((speakerId, index) => {
+  speakerOrder.forEach(speakerId => {
     const currentRole = speakerRoleMap[speakerId];
-    speakerRoleMap[speakerId] = roles.includes(currentRole) ? currentRole : roles[index] || '';
+    if (currentRole && !roles.includes(currentRole)) {
+      assignSpeakerRole(speakerId, '');
+    }
+    const sample = transcriptTurns
+      .filter(turn => turn.speakerId === speakerId)
+      .slice(0, 8)
+      .map(turn => turn.text)
+      .join(' ');
+    ensureSpeakerRole(speakerId, sample);
   });
+  assignRemainingRoleIfClear();
 }
 
 function updateSpeakerRoleControls() {
@@ -793,7 +929,7 @@ function updateSpeakerRoleControls() {
   hint.className = 'speaker-role-hint';
   hint.textContent = speakerOrder.length === 0
     ? `角色映射：等待识别说话人，识别后可设为 ${roles.slice(0, 2).join(' / ')}`
-    : '角色映射：默认按当前场景猜测，识别错了改一次即可';
+    : '角色映射：已根据开场内容自动判断，不确定时保持未指定';
   $speakerRoleControls.appendChild(hint);
 
   if (speakerOrder.length === 0) return;
@@ -824,18 +960,41 @@ function updateSpeakerRoleControls() {
 
     select.value = speakerRoleMap[speakerId] || '';
     select.onchange = () => {
-      speakerRoleMap[speakerId] = select.value;
+      assignSpeakerRole(speakerId, select.value, 'manual');
+      assignRemainingRoleIfClear();
       refreshTranscriptSpeakerLabels();
       rebuildTranscriptState();
       resetConversationMemory();
       maybeRefreshConversationMemory();
       updateCharCount();
+      updateSpeakerRoleControls();
     };
 
     item.appendChild(label);
     item.appendChild(select);
     $speakerRoleControls.appendChild(item);
   });
+
+  const mappedSpeakers = speakerOrder.slice(0, 2);
+  if (mappedSpeakers.length === 2 && mappedSpeakers.every(speakerId => speakerRoleMap[speakerId])) {
+    const swapButton = document.createElement('button');
+    swapButton.type = 'button';
+    swapButton.className = 'speaker-role-swap';
+    swapButton.textContent = '交换角色';
+    swapButton.title = '交换前两位说话人的场景角色';
+    swapButton.onclick = () => {
+      const [first, second] = mappedSpeakers;
+      const firstRole = speakerRoleMap[first];
+      assignSpeakerRole(first, speakerRoleMap[second], 'manual');
+      assignSpeakerRole(second, firstRole, 'manual');
+      refreshTranscriptSpeakerLabels();
+      rebuildTranscriptState();
+      resetConversationMemory();
+      maybeRefreshConversationMemory();
+      updateSpeakerRoleControls();
+    };
+    $speakerRoleControls.appendChild(swapButton);
+  }
 }
 
 function refreshTranscriptSpeakerLabels() {
@@ -940,6 +1099,12 @@ async function startRecording() {
     // 再启动音频采集
     await startAudioCapture();
 
+    clearStopExportPromptTimer();
+    if (!sessionStartedAt) {
+      sessionStartedAt = new Date().toISOString();
+    }
+    sessionEndedAt = null;
+
     isRecording = true;
     lastFinalText = '';
     $btnToggle.textContent = '停止';
@@ -974,6 +1139,7 @@ async function startRecording() {
 
 function stopRecording() {
   isRecording = false;
+  sessionEndedAt = new Date().toISOString();
 
   // 发送停止信号
   if (asrWs && asrWs.readyState === WebSocket.OPEN) {
@@ -1000,6 +1166,8 @@ function stopRecording() {
     clearInterval(timerInterval);
     timerInterval = null;
   }
+
+  scheduleStopExportPrompt();
 }
 
 // ── 转写文本管理 ──────────────────────────────────────────
@@ -1090,6 +1258,7 @@ function clearTranscript() {
   speakerOrder = [];
   speakerLabelMap = {};
   speakerRoleMap = {};
+  speakerRoleSource = {};
   transcriptTurns = [];
   recentTurnKeys = new Map();
   turnCounter = 0;
@@ -1181,6 +1350,7 @@ async function generateSuggestions() {
         transcript: getRecentContextForSuggestions(),
         scriptContent: scriptContent || '',
         previousSummary: shouldUseConversationMemory() ? conversationMemory : '',
+        questionHistory: serializeQuestionHistory(),
         sceneMode: $sceneMode.value,
         customPrompt: $customPrompt.value || ''
       })
@@ -1197,11 +1367,13 @@ async function generateSuggestions() {
       return;
     }
 
-    if (data.suggestions) {
-      addSuggestionGroup(data.suggestions);
-    }
+    const addedCount = data.suggestions
+      ? addSuggestionGroup(data.suggestions, 'suggestion', data.diagnostics || null)
+      : 0;
 
-    $llmStatus.textContent = `LLM: 已生成（${data.model || ''})`;
+    $llmStatus.textContent = addedCount > 0
+      ? `LLM: 已生成（${data.model || ''})`
+      : 'LLM: 暂无新增问题';
     $llmStatus.style.color = '#22c55e';
 
     // 3 秒后恢复待命状态
@@ -1233,7 +1405,21 @@ function manualDeepTrigger() {
     alert('正在生成中，请稍候...');
     return;
   }
-  generateDeepSuggestions('manual');
+  const round = getManualDeepRound();
+  if (!round || !round.text || normalizeDuplicateText(round.text).length < 20) {
+    alert('还没有足够完整的一轮表达，建议再听一段后点击。');
+    return;
+  }
+
+  const contextAgeMs = getRoundContextAgeMs(round);
+  let allowStaleContext = false;
+  if (contextAgeMs > DEEP_CONTEXT_MAX_AGE_MS) {
+    const ageMinutes = Math.max(1, Math.round(contextAgeMs / 60000));
+    allowStaleContext = confirm(`最近转写已停更约 ${ageMinutes} 分钟。是否仍基于这段旧上下文生成深度追问？`);
+    if (!allowStaleContext) return;
+  }
+
+  generateDeepSuggestions('manual', round, { contextAgeMs, allowStaleContext });
 }
 
 function getManualDeepRound() {
@@ -1272,9 +1458,17 @@ function buildFallbackDeepRound() {
     role: '',
     turnIds: [],
     text,
+    startedAt: transcriptTurns.at(-8)?.receivedAt || Date.now(),
+    endedAt: transcriptTurns.at(-1)?.receivedAt || Date.now(),
     reason: 'manual-fallback',
     fallback: true
   };
+}
+
+function getRoundContextAgeMs(round) {
+  const rawEndedAt = round?.endedAt || transcriptTurns.at(-1)?.receivedAt || Date.now();
+  const endedAt = typeof rawEndedAt === 'number' ? rawEndedAt : Date.parse(rawEndedAt);
+  return Number.isFinite(endedAt) ? Math.max(0, Date.now() - endedAt) : 0;
 }
 
 function serializeDeepRound(round) {
@@ -1287,6 +1481,8 @@ function serializeDeepRound(round) {
     speakerLabel,
     role,
     text: round.text || '',
+    startedAt: round.startedAt || '',
+    endedAt: round.endedAt || '',
     reason: round.reason || '',
     fallback: !!round.fallback
   };
@@ -1307,7 +1503,7 @@ function getRecentRounds(round) {
     .map(serializeDeepRound);
 }
 
-async function generateDeepSuggestions(triggerType, sourceRound = null) {
+async function generateDeepSuggestions(triggerType, sourceRound = null, options = {}) {
   if (!isDeepSupportedScene()) return;
 
   const round = sourceRound || getManualDeepRound();
@@ -1329,6 +1525,7 @@ async function generateDeepSuggestions(triggerType, sourceRound = null) {
   $llmStatus.style.color = '#f59e0b';
 
   try {
+    const contextAgeMs = options.contextAgeMs ?? getRoundContextAgeMs(round);
     const res = await fetch('/api/deep-suggestions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1339,6 +1536,9 @@ async function generateDeepSuggestions(triggerType, sourceRound = null) {
         sameSpeakerHistory: getSameSpeakerHistory(round),
         recentRounds: getRecentRounds(round),
         conversationMemory: shouldUseConversationMemory() ? conversationMemory : '',
+        questionHistory: serializeQuestionHistory(),
+        contextAgeMs,
+        allowStaleContext: !!options.allowStaleContext,
         triggerType
       })
     });
@@ -1352,12 +1552,18 @@ async function generateDeepSuggestions(triggerType, sourceRound = null) {
       return;
     }
 
-    const notice = round.fallback ? '未识别说话人，已按最近上下文生成' : '';
-    if (Array.isArray(data.suggestions) && data.suggestions.length > 0) {
-      addDeepSuggestionGroup(data.suggestions, triggerType, notice);
+    const notices = [];
+    if (round.fallback) notices.push('未识别说话人，已按最近上下文生成');
+    if (contextAgeMs > DEEP_CONTEXT_MAX_AGE_MS) {
+      notices.push(`上下文已停更 ${Math.max(1, Math.round(contextAgeMs / 60000))} 分钟`);
     }
+    const addedCount = Array.isArray(data.suggestions)
+      ? addDeepSuggestionGroup(data.suggestions, triggerType, notices.join('；'), data.diagnostics || null)
+      : 0;
 
-    $llmStatus.textContent = `LLM: 已生成深度追问（${data.model || ''})`;
+    $llmStatus.textContent = addedCount > 0
+      ? `LLM: 已生成深度追问（${data.model || ''})`
+      : `LLM: ${data.reason || '当前没有值得打断的新问题'}`;
     $llmStatus.style.color = '#22c55e';
   } catch (err) {
     console.error('深度追问请求失败:', err);
@@ -1475,21 +1681,56 @@ async function generateJudgingScore() {
 }
 
 // ── 追问建议显示 ──────────────────────────────────────────
-function addSuggestionGroup(rawText, groupType = 'suggestion') {
-  const emptyState = $suggestionsContainer.querySelector('.empty-state');
-  if (emptyState) emptyState.remove();
-
-  // 解析建议（按行拆分，去掉空行和序号前缀）
-  const lines = rawText.split('\n')
+function parseSuggestionLines(rawText) {
+  return rawText.split('\n')
     .map(line => line.trim())
     .filter(line => line.length > 0)
     .map(line => line
       .replace(/^#{1,4}\s*/, '')
       .replace(/^[-*]\s*/, '')
       .replace(/^\d+[\.\、\)]\s*/, '')
-      .trim());
+      .trim())
+    .filter(line => line.length > 0 && !/^\[?NO_NEW_QUESTION\]?$/i.test(line))
+    .map(text => {
+      const tagMatch = text.match(/^(\[[^\]]+\])\s*(.*)$/);
+      if (!tagMatch) {
+        return { tag: '', text, used: false };
+      }
+      return {
+        tag: tagMatch[1].slice(1, -1),
+        text: tagMatch[2] || text,
+        used: false
+      };
+    });
+}
 
-  if (lines.length === 0) return;
+function addSuggestionGroup(rawText, groupType = 'suggestion', diagnostics = null) {
+  let items = parseSuggestionLines(rawText);
+  if (groupType === 'suggestion' && ['live-host', 'interview', 'recruitment'].includes($sceneMode.value)) {
+    items = items.filter(item => /[？?]/.test(item.text));
+  }
+  if (groupType === 'suggestion') {
+    items = filterNovelQuestionItems(items, item => item.text);
+  }
+  if (items.length === 0) return 0;
+
+  const emptyState = $suggestionsContainer.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  const createdAt = new Date();
+  const groupRecord = {
+    id: `group-${++exportGroupCounter}`,
+    type: groupType,
+    title: getSuggestionGroupTitle(groupType),
+    createdAt: createdAt.toISOString(),
+    sceneMode: $sceneMode.value,
+    sceneLabel: getSceneLabel(),
+    rawText,
+    diagnostics,
+    items
+  };
+  suggestionGroups.push(groupRecord);
+  items.forEach(item => registerQuestionItem(item, groupType, createdAt));
 
   // 创建建议组
   const group = document.createElement('div');
@@ -1497,23 +1738,24 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
 
   const header = document.createElement('div');
   header.className = 'group-header';
-  header.textContent = getSuggestionGroupHeader(groupType);
+  header.textContent = getSuggestionGroupHeader(groupType, createdAt);
   group.appendChild(header);
 
-  lines.forEach(text => {
+  items.forEach(item => {
     const card = document.createElement('div');
     card.className = 'suggestion-card';
-    card.onclick = () => card.classList.toggle('used');
+    card.onclick = () => {
+      card.classList.toggle('used');
+      item.used = card.classList.contains('used');
+      updateQuestionLedgerUsage(item);
+    };
 
-    const tagMatch = text.match(/^(\[[^\]]+\])\s*(.*)$/);
-    if (tagMatch) {
-      const tagText = tagMatch[1].slice(1, -1);
-      text = tagMatch[2] || text;
-      card.classList.add(`tag-${getTagClass(tagText)}`);
+    if (item.tag) {
+      card.classList.add(`tag-${getTagClass(item.tag)}`);
 
       const tag = document.createElement('div');
       tag.className = 'suggestion-tag';
-      tag.textContent = tagText;
+      tag.textContent = item.tag;
       card.appendChild(tag);
     }
 
@@ -1523,7 +1765,7 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
 
     const textEl = document.createElement('div');
     textEl.className = 'suggestion-text';
-    textEl.textContent = text;
+    textEl.textContent = item.text;
 
     card.appendChild(textEl);
     group.appendChild(card);
@@ -1533,29 +1775,57 @@ function addSuggestionGroup(rawText, groupType = 'suggestion') {
   // 插入到最前面
   $suggestionsContainer.insertBefore(group, $suggestionsContainer.firstChild);
   $suggestionCount.textContent = suggestionCount;
+  return items.length;
 }
 
-function addDeepSuggestionGroup(suggestions, triggerType, notice = '') {
-  const emptyState = $suggestionsContainer.querySelector('.empty-state');
-  if (emptyState) emptyState.remove();
+function normalizeOptionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
 
-  const items = suggestions
+function addDeepSuggestionGroup(suggestions, triggerType, notice = '', diagnostics = null) {
+  let items = suggestions
     .map(item => ({
       tag: normalizeDeepTag(item.tag),
       question: (item.question || '').trim(),
       why: (item.why || '').trim(),
-      basedOn: (item.basedOn || '').trim()
+      basedOn: (item.basedOn || '').trim(),
+      confidence: normalizeOptionalNumber(item.confidence),
+      candidateScore: normalizeOptionalNumber(item.candidateScore),
+      selectionScore: normalizeOptionalNumber(item.selectionScore),
+      selectionReason: (item.selectionReason || '').trim()
     }))
     .filter(item => item.question);
 
-  if (items.length === 0) return;
+  items = filterNovelQuestionItems(items, item => item.question).slice(0, 1);
+  if (items.length === 0) return 0;
+
+  const emptyState = $suggestionsContainer.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+
+  const createdAt = new Date();
+  const groupRecord = {
+    id: `group-${++exportGroupCounter}`,
+    type: 'deep',
+    title: '深度追问',
+    createdAt: createdAt.toISOString(),
+    sceneMode: $sceneMode.value,
+    sceneLabel: getSceneLabel(),
+    triggerType,
+    notice,
+    diagnostics,
+    items: items.map(item => ({ ...item, text: item.question, used: false }))
+  };
+  suggestionGroups.push(groupRecord);
+  groupRecord.items.forEach(item => registerQuestionItem(item, 'deep', createdAt));
 
   const group = document.createElement('div');
   group.className = 'suggestion-group deep-group';
 
   const header = document.createElement('div');
   header.className = 'group-header deep-header';
-  header.textContent = `深度追问 · ${formatTime(new Date())}${triggerType === 'auto' ? ' · 自动' : ''}`;
+  header.textContent = `深度追问 · ${formatTime(createdAt)}${triggerType === 'auto' ? ' · 自动' : ''}`;
   group.appendChild(header);
 
   if (notice) {
@@ -1565,10 +1835,15 @@ function addDeepSuggestionGroup(suggestions, triggerType, notice = '') {
     group.appendChild(noticeEl);
   }
 
-  items.forEach(item => {
+  items.forEach((item, index) => {
+    const recordItem = groupRecord.items[index];
     const card = document.createElement('div');
     card.className = `suggestion-card deep-card tag-${getTagClass(item.tag)}`;
-    card.onclick = () => card.classList.toggle('used');
+    card.onclick = () => {
+      card.classList.toggle('used');
+      recordItem.used = card.classList.contains('used');
+      updateQuestionLedgerUsage(recordItem);
+    };
 
     const meta = document.createElement('div');
     meta.className = 'deep-meta';
@@ -1602,6 +1877,7 @@ function addDeepSuggestionGroup(suggestions, triggerType, notice = '') {
 
   $suggestionsContainer.insertBefore(group, $suggestionsContainer.firstChild);
   $suggestionCount.textContent = suggestionCount;
+  return items.length;
 }
 
 function normalizeDeepTag(tag) {
@@ -1609,13 +1885,16 @@ function normalizeDeepTag(tag) {
   return ['追问', '回扣', '反差', '澄清', '风险'].includes(text) ? text : '追问';
 }
 
-function getSuggestionGroupHeader(groupType) {
+function getSuggestionGroupHeader(groupType, date = new Date()) {
+  return `${formatTime(date)}${getSuggestionGroupTitle(groupType) ? ` · ${getSuggestionGroupTitle(groupType)}` : ''}`;
+}
+
+function getSuggestionGroupTitle(groupType) {
   const titleMap = {
     review: '面试复盘',
     score: '评审评分表'
   };
-  const title = titleMap[groupType];
-  return title ? `${formatTime(new Date())} · ${title}` : formatTime(new Date());
+  return titleMap[groupType] || '';
 }
 
 function getTagClass(tagText) {
@@ -1644,6 +1923,405 @@ function getTagClass(tagText) {
   return map[tagText] || 'note';
 }
 
+// ── 会后复盘导出 ──────────────────────────────────────────
+function clearStopExportPromptTimer() {
+  if (stopExportPromptTimer) {
+    clearTimeout(stopExportPromptTimer);
+    stopExportPromptTimer = null;
+  }
+}
+
+function scheduleStopExportPrompt() {
+  clearStopExportPromptTimer();
+  if (exportPromptedForSession) return;
+
+  stopExportPromptTimer = setTimeout(() => {
+    stopExportPromptTimer = null;
+    if (isRecording || exportPromptedForSession || !hasExportableContent()) return;
+
+    exportPromptedForSession = true;
+    if (confirm('本轮对话已停止，要导出复盘包吗？')) {
+      exportReviewPackage('stop');
+    }
+  }, 3400);
+}
+
+function hasExportableContent() {
+  return fullTranscript.trim().length > 0 || transcriptTurns.length > 0 || suggestionGroups.length > 0;
+}
+
+async function exportReviewPackage(source = 'manual') {
+  if (!hasExportableContent()) {
+    alert('还没有可导出的记录。先录音或生成一些 AI 追问/判断点后再导出。');
+    return;
+  }
+  if (isExporting) {
+    alert('正在导出中，请稍候...');
+    return;
+  }
+
+  isExporting = true;
+  if ($btnExportReview) $btnExportReview.disabled = true;
+  $llmStatus.textContent = 'LLM: 整理复盘包...';
+  $llmStatus.style.color = '#f59e0b';
+
+  const payload = buildExportPayload(source);
+  let recap = '';
+  let recapError = '';
+  let recapModel = '';
+  let recapDiagnostics = null;
+
+  try {
+    const recapRes = await fetch('/api/export-recap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...payload,
+        scriptContent: scriptContent || ''
+      })
+    });
+    const recapData = await recapRes.json();
+    if (!recapRes.ok) {
+      recapError = recapData.error || 'AI 整理失败';
+    } else {
+      recap = recapData.recap || '';
+      recapModel = recapData.model || '';
+      recapDiagnostics = recapData.diagnostics || null;
+    }
+  } catch (err) {
+    recapError = err.message || 'AI 整理请求失败';
+  }
+
+  const exportData = {
+    ...payload,
+    recap: {
+      markdown: recap,
+      error: recapError,
+      model: recapModel,
+      diagnostics: recapDiagnostics
+    }
+  };
+  const markdown = buildExportMarkdown(exportData);
+  const baseName = buildExportBaseName(exportData);
+
+  try {
+    const packageRes = await fetch('/api/export-package', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseName,
+        markdown,
+        json: exportData
+      })
+    });
+
+    if (!packageRes.ok) {
+      let message = '导出 ZIP 失败';
+      try {
+        const data = await packageRes.json();
+        message = data.error || message;
+      } catch (_) {}
+      alert(message);
+      $llmStatus.textContent = `LLM: ${message}`;
+      $llmStatus.style.color = '#ef4444';
+      return;
+    }
+
+    const blob = await packageRes.blob();
+    downloadBlob(blob, `${baseName}.zip`);
+    exportPromptedForSession = true;
+    $llmStatus.textContent = recapError ? 'LLM: 已导出（整理失败，保留原始记录）' : 'LLM: 复盘包已导出';
+    $llmStatus.style.color = recapError ? '#f59e0b' : '#22c55e';
+  } catch (err) {
+    alert('导出失败: ' + err.message);
+    $llmStatus.textContent = 'LLM: 导出失败';
+    $llmStatus.style.color = '#ef4444';
+  } finally {
+    isExporting = false;
+    if ($btnExportReview) $btnExportReview.disabled = false;
+  }
+}
+
+function buildExportPayload(source) {
+  const exportedAt = new Date();
+  const startedAt = sessionStartedAt || inferFirstTranscriptTime() || exportedAt.toISOString();
+  const reportedEndedAt = sessionEndedAt || exportedAt.toISOString();
+  const lastTranscriptAt = inferLastTranscriptTime();
+  const inactiveTailSeconds = lastTranscriptAt
+    ? Math.max(0, Math.round((Date.parse(reportedEndedAt) - Date.parse(lastTranscriptAt)) / 1000))
+    : 0;
+  const endedAt = inactiveTailSeconds > 300 ? lastTranscriptAt : reportedEndedAt;
+  const durationSeconds = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000));
+
+  return {
+    schemaVersion: '1.1',
+    exportedAt: exportedAt.toISOString(),
+    source,
+    session: {
+      sceneMode: $sceneMode.value,
+      sceneLabel: getSceneLabel(),
+      startedAt,
+      endedAt,
+      durationSeconds,
+      durationText: formatDurationText(durationSeconds),
+      model: appConfig.model || '',
+      models: appConfig.models || {},
+      llmProvider: appConfig.llmProvider || '',
+      inactiveTailSeconds,
+      transcriptCharCount: fullTranscript.length,
+      suggestionCount,
+      uploadedMaterial: scriptMeta ? { ...scriptMeta } : null
+    },
+    suggestionGroups: serializeSuggestionGroups(),
+    questionLedger: questionLedger.map(item => ({ ...item })),
+    conversationMemory,
+    speakerRoles: speakerOrder.map(speakerId => ({
+      speakerId,
+      speakerLabel: getSpeakerLabel(speakerId),
+      role: speakerRoleMap[speakerId] || '',
+      source: speakerRoleSource[speakerId] || ''
+    })),
+    transcript: {
+      text: fullTranscript,
+      turns: serializeTranscriptTurns()
+    }
+  };
+}
+
+function inferFirstTranscriptTime() {
+  const firstTurn = transcriptTurns.find(turn => turn.receivedAt);
+  return firstTurn ? new Date(firstTurn.receivedAt).toISOString() : null;
+}
+
+function inferLastTranscriptTime() {
+  const lastTurn = [...transcriptTurns].reverse().find(turn => turn.receivedAt);
+  return lastTurn ? new Date(lastTurn.receivedAt).toISOString() : null;
+}
+
+function serializeSuggestionGroups() {
+  return suggestionGroups.map(group => ({
+    id: group.id,
+    type: group.type,
+    title: group.title || getSuggestionGroupTitle(group.type),
+    createdAt: group.createdAt,
+    sceneMode: group.sceneMode,
+    sceneLabel: group.sceneLabel,
+    triggerType: group.triggerType || '',
+    notice: group.notice || '',
+    rawText: group.rawText || '',
+    diagnostics: group.diagnostics || null,
+    items: (group.items || []).map(item => ({
+      tag: item.tag || '',
+      text: item.text || item.question || '',
+      question: item.question || '',
+      why: item.why || '',
+      basedOn: item.basedOn || '',
+      confidence: item.confidence ?? null,
+      candidateScore: item.candidateScore ?? null,
+      selectionScore: item.selectionScore ?? null,
+      selectionReason: item.selectionReason || '',
+      detail: item.detail || item.basedOn || item.why || '',
+      ledgerId: item.ledgerId || '',
+      used: !!item.used
+    }))
+  }));
+}
+
+function serializeTranscriptTurns() {
+  return transcriptTurns.map(turn => ({
+    id: turn.id,
+    speakerId: turn.speakerId || '',
+    speakerLabel: getSpeakerLabel(turn.speakerId),
+    role: speakerRoleMap[turn.speakerId] || '',
+    displayName: getSpeakerDisplayName(turn.speakerId),
+    text: turn.text,
+    startMs: turn.startMs,
+    endMs: turn.endMs,
+    receivedAt: turn.receivedAt ? new Date(turn.receivedAt).toISOString() : ''
+  }));
+}
+
+function buildExportBaseName(exportData) {
+  return `把天聊下去-复盘包-${exportData.session.sceneLabel}-${formatFileTimestamp(new Date(exportData.exportedAt))}`
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-');
+}
+
+function buildExportMarkdown(exportData) {
+  const session = exportData.session;
+  const lines = [];
+  lines.push(`# 把天聊下去复盘包 - ${session.sceneLabel}`);
+  lines.push(`导出时间：${formatReadableDateTime(exportData.exportedAt)}`);
+
+  lines.push([
+    '## 会话元信息',
+    `- 场景：${session.sceneLabel}`,
+    `- 开始：${formatReadableDateTime(session.startedAt)}`,
+    `- 结束：${formatReadableDateTime(session.endedAt)}`,
+    `- 时长：${session.durationText || '00:00:00'}`,
+    `- 模型：${session.model || '未记录'}`,
+    `- LLM 中转：${session.llmProvider || '未记录'}`,
+    ...(session.inactiveTailSeconds > 300
+      ? [`- 已排除停止收音后的空闲时长：${formatDurationText(session.inactiveTailSeconds)}`]
+      : []),
+    `- AI 输出卡片：${session.suggestionCount} 条`,
+    `- 转写字数：${session.transcriptCharCount} 字`,
+    `- 上传资料：${session.uploadedMaterial ? `${session.uploadedMaterial.filename}（${session.uploadedMaterial.charCount || 0} 字）` : '无'}`
+  ].join('\n'));
+
+  lines.push([
+    '## AI 会后整理',
+    exportData.recap.error
+      ? `> AI 整理失败：${escapeMarkdownInline(exportData.recap.error)}\n\n以下内容保留原始记录，方便手动复盘。`
+      : (exportData.recap.markdown || '（AI 未返回整理内容）')
+  ].join('\n\n'));
+
+  lines.push([
+    '## 判断点总览',
+    buildJudgmentSummaryMarkdown(exportData.suggestionGroups)
+  ].join('\n\n'));
+
+  lines.push([
+    '## 评分表 / 复盘结果',
+    buildReviewScoreMarkdown(exportData.suggestionGroups)
+  ].join('\n\n'));
+
+  lines.push([
+    '## 追问与判断点原始记录',
+    buildRawSuggestionGroupsMarkdown(exportData.suggestionGroups)
+  ].join('\n\n'));
+
+  lines.push([
+    '## 实时转写附录',
+    exportData.transcript.text.trim()
+      ? `\`\`\`text\n${escapeFenceText(exportData.transcript.text.trim())}\n\`\`\``
+      : '（没有转写内容）'
+  ].join('\n\n'));
+
+  return `${lines.join('\n\n')}\n`;
+}
+
+function buildJudgmentSummaryMarkdown(groups) {
+  const priorities = ['证据', '疑点', '风险', '亮点', '追问', '深度追问', '回扣', '反差', '澄清', '推荐', '谈判', '问题', '考察点', '结构', '素材', '其他'];
+  const buckets = new Map(priorities.map(tag => [tag, []]));
+
+  groups
+    .filter(group => !['review', 'score'].includes(group.type))
+    .forEach(group => {
+      (group.items || []).forEach(item => {
+        const tag = item.tag || (group.type === 'deep' ? '深度追问' : '其他');
+        const bucket = buckets.get(tag) || buckets.get('其他');
+        const detail = item.detail || item.basedOn || item.why || '';
+        bucket.push({
+          text: item.text || item.question || '',
+          detail,
+          time: group.createdAt,
+          used: item.used
+        });
+      });
+    });
+
+  const sections = priorities
+    .map(tag => {
+      const items = buckets.get(tag) || [];
+      if (items.length === 0) return '';
+      const body = items.map(item => {
+        const used = item.used ? '（已标记使用）' : '';
+        const detail = item.detail ? `\n  - 依据：${escapeMarkdownInline(item.detail)}` : '';
+        return `- ${escapeMarkdownInline(item.text)}${used}${detail}`;
+      }).join('\n');
+      return `### ${tag}\n${body}`;
+    })
+    .filter(Boolean);
+
+  return sections.length > 0 ? sections.join('\n\n') : '（暂无可分组的判断点）';
+}
+
+function buildReviewScoreMarkdown(groups) {
+  const reviewGroups = groups.filter(group => ['review', 'score'].includes(group.type));
+  if (reviewGroups.length === 0) return '（未生成评分表或复盘结果）';
+
+  return reviewGroups.map(group => {
+    const title = group.title || getSuggestionGroupTitle(group.type) || '复盘结果';
+    const raw = group.rawText || (group.items || []).map(item => item.text).join('\n');
+    return `### ${formatReadableDateTime(group.createdAt)} · ${title}\n\n${raw}`;
+  }).join('\n\n');
+}
+
+function buildRawSuggestionGroupsMarkdown(groups) {
+  if (groups.length === 0) return '（没有 AI 输出记录）';
+
+  return groups.map(group => {
+    const title = group.title || getSuggestionGroupTitle(group.type) || 'AI 输出';
+    const meta = [
+      formatReadableDateTime(group.createdAt),
+      title,
+      group.triggerType === 'auto' ? '自动' : group.triggerType === 'manual' ? '手动' : ''
+    ].filter(Boolean).join(' · ');
+    const body = (group.items || []).map(item => {
+      const tag = item.tag ? `[${item.tag}] ` : '';
+      const text = item.text || item.question || '';
+      const detail = item.detail || item.basedOn || item.why || '';
+      const used = item.used ? '（已标记使用）' : '';
+      return `- ${tag}${escapeMarkdownInline(text)}${used}${detail ? `\n  - 依据：${escapeMarkdownInline(detail)}` : ''}`;
+    }).join('\n') || '（无结构化条目）';
+    return `### ${meta}\n${body}`;
+  }).join('\n\n');
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function getSceneLabel() {
+  return $sceneMode.selectedOptions?.[0]?.textContent || $sceneMode.value;
+}
+
+function formatDurationText(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds) || 0);
+  const h = String(Math.floor(seconds / 3600)).padStart(2, '0');
+  const m = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
+  const s = String(seconds % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+function formatFileTimestamp(date) {
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  return `${y}${mo}${d}-${h}${mi}`;
+}
+
+function formatReadableDateTime(value) {
+  if (!value) return '未记录';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const y = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const h = String(date.getHours()).padStart(2, '0');
+  const mi = String(date.getMinutes()).padStart(2, '0');
+  const s = String(date.getSeconds()).padStart(2, '0');
+  return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+}
+
+function escapeMarkdownInline(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function escapeFenceText(text) {
+  return String(text || '').replace(/```/g, '`\\`\\`');
+}
+
 // ── 资料上传 ──────────────────────────────────────────────
 async function uploadScript(input) {
   const file = input.files[0];
@@ -1666,6 +2344,11 @@ async function uploadScript(input) {
     }
 
     scriptContent = data.content;
+    scriptMeta = {
+      filename: data.filename,
+      charCount: data.charCount,
+      loadedAt: new Date().toISOString()
+    };
     $scriptStatus.textContent = `已加载资料: ${data.filename} (${data.charCount} 字)`;
   } catch (err) {
     alert('上传失败: ' + err.message);
