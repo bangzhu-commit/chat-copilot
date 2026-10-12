@@ -97,6 +97,14 @@ npm start
 
 > 📖 更详细的安装步骤（含 API 申请教程）请参考 [同事安装指南.md](同事安装指南.md)
 
+### 分享给同事
+
+直接发送 [最新版源码 ZIP](https://github.com/bangzhu-commit/chat-copilot/archive/refs/heads/main.zip) 和 [安装指南](同事安装指南.md) 即可，同事无需安装 Git。解压后安装 Node.js，复制 `.env.example` 为 `.env`、填入自己的模型和语音识别凭证，再运行 `npm ci` 和 `npm start`。macOS 也可双击 `启动.command`。
+
+公开下载包不包含 API 密钥、依赖目录或会话记录。每台电脑的 `localhost:3000` 只代表它自己的本地服务，不能把你电脑上的这个地址当成同事可用的网址。
+
+如果需要“打开链接就能用”，可以另行部署带 HTTPS、WebSocket 和登录保护的共享服务，并设置用量限制；当前 GitHub 仓库提供的是本地运行版本。
+
 ## 🏗️ 技术架构
 
 ```
@@ -129,6 +137,10 @@ LLM_MODEL=deepseek/deepseek-chat          # 模型选择
 LLM_MODEL_FAST=                            # 可选：普通追问模型，留空沿用 LLM_MODEL
 LLM_MODEL_DEEP=                            # 可选：深度追问模型，留空沿用 LLM_MODEL
 LLM_MODEL_RECAP=                           # 可选：复盘模型，留空沿用 LLM_MODEL
+LLM_REASONING_FAST=                        # OpenRouter 可选：普通追问/滚动记忆思考力度
+LLM_REASONING_DEEP=                        # OpenRouter 可选：深度追问思考力度
+LLM_REASONING_RECAP=                       # OpenRouter 可选：复盘/评分思考力度
+LLM_DEEP_MAX_TOKENS=700                    # 深度追问总输出预算，开启推理后可能需要提高
 LLM_TIMEOUT_MS=60000                       # 单次模型请求超时
 
 # ── 火山引擎 ASR 配置（必填）──────────────
@@ -141,6 +153,8 @@ MIN_INTERVAL=20000        # 两次追问最小间隔（毫秒）
 MIN_TEXT_LENGTH=50        # 触发追问的最小新增文本量（字）
 LONG_CONTEXT_MEMORY_ENABLED=true # 直播/访谈长对话记忆；设为 false 可减少后台调用
 ```
+
+`LLM_REASONING_*` 仅对 OpenRouter 生效，留空时不发送思考力度参数。仅填写所选模型支持的等级；实时追问可减少思考以降低等待时间，深度追问可单独提高。多数推理模型的思考与正文共用 `max_tokens`，预算过小可能造成正文截断或为空，可提高 `LLM_DEEP_MAX_TOKENS`。参数支持情况见 [OpenRouter 官方说明](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)。
 
 **LLM 模型推荐**：
 
@@ -300,7 +314,7 @@ DEEP [澄清] 这个“用户反馈不错”具体来自多少人？
 > 检查 `.env` 里的 ASR 密钥是否正确。确认火山引擎后台已开通「流式语音识别模型2.0」并完成实名认证。
 
 **Q：LLM 报错 403？**
-> OpenRouter 上部分模型有地区限制。建议使用 `deepseek/deepseek-chat`，没有这个问题。
+> 检查服务商返回的错误详情、密钥权限和账号所在地区的模型可用范围，再将 `LLM_MODEL` 或对应任务模型改为账号可调用的模型。模板中的模型 ID 是示例，不保证所有账号均可访问。
 
 **Q：没有声音 / 不转写？**
 > 检查 Chrome 是否授权了麦克风权限（地址栏左边的锁图标 → 网站设置 → 麦克风 → 允许）。
@@ -367,6 +381,14 @@ npm start
 ```
 
 Open **http://localhost:3000** in Chrome.
+
+### Sharing
+
+Send the [latest source ZIP](https://github.com/bangzhu-commit/chat-copilot/archive/refs/heads/main.zip) and the [installation guide](同事安装指南.md). Git is not required. Each user installs Node.js, copies `.env.example` to `.env`, provides their own LLM and ASR credentials, and runs `npm ci` then `npm start`. macOS users can also use `启动.command`.
+
+The public package contains no API keys or conversation records. `localhost:3000` refers to each computer. A shared browser-only service requires separate deployment with HTTPS, WebSocket support, authentication, and usage limits.
+
+OpenRouter users can set `LLM_REASONING_FAST`, `LLM_REASONING_DEEP`, and `LLM_REASONING_RECAP` separately. Leave them empty to use model defaults, and only set supported effort levels. `LLM_DEEP_MAX_TOKENS` controls the deep-question output budget; reasoning may share this budget with visible output.
 
 ### Requirements
 

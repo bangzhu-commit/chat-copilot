@@ -19,6 +19,10 @@ const LLM_MODEL_FAST = process.env.LLM_MODEL_FAST || LLM_MODEL;
 const LLM_MODEL_DEEP = process.env.LLM_MODEL_DEEP || LLM_MODEL;
 const LLM_MODEL_RECAP = process.env.LLM_MODEL_RECAP || LLM_MODEL;
 const LLM_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS, 10) || 60000;
+const LLM_REASONING_FAST = process.env.LLM_REASONING_FAST || '';
+const LLM_REASONING_DEEP = process.env.LLM_REASONING_DEEP || '';
+const LLM_REASONING_RECAP = process.env.LLM_REASONING_RECAP || '';
+const LLM_DEEP_MAX_TOKENS = parseInt(process.env.LLM_DEEP_MAX_TOKENS, 10) || 700;
 const SUGGESTION_CONTEXT_CHARS = 12000;
 const MEMORY_MAX_CHARS = 5000;
 const LONG_CONTEXT_MEMORY_ENABLED = process.env.LONG_CONTEXT_MEMORY_ENABLED !== 'false';
@@ -724,6 +728,16 @@ async function callLlm(messages, {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
 
+  const reasoningEffort = requestType === 'deep-candidates'
+    ? LLM_REASONING_DEEP
+    : ['suggestions', 'conversation-memory'].includes(requestType)
+      ? LLM_REASONING_FAST
+      : LLM_REASONING_RECAP;
+  const requestBody = { model, messages, temperature, max_tokens: maxTokens };
+  if (LLM_PROVIDER_HOST === 'openrouter.ai' && reasoningEffort) {
+    requestBody.reasoning = { effort: reasoningEffort };
+  }
+
   try {
     response = await fetch(LLM_ENDPOINT, {
       method: 'POST',
@@ -732,12 +746,7 @@ async function callLlm(messages, {
         'Authorization': `Bearer ${LLM_API_KEY}`
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens
-      })
+      body: JSON.stringify(requestBody)
     });
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1000,7 +1009,7 @@ app.post('/api/deep-suggestions', async (req, res) => {
       { role: 'user', content: userPrompt }
     ], {
       temperature: 0.3,
-      maxTokens: 700,
+      maxTokens: LLM_DEEP_MAX_TOKENS,
       model: LLM_MODEL_DEEP,
       requestType: 'deep-candidates'
     });
