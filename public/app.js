@@ -165,6 +165,7 @@ const $elapsedTime = document.getElementById('elapsedTime');
 
 // ── 初始化 ────────────────────────────────────────────────
 async function init() {
+  initializeWorkbench();
   await loadConfig();
   await loadAudioDevices();
   onSceneModeChange();
@@ -194,7 +195,7 @@ function onSceneModeChange() {
 
   const ui = SCENE_UI[mode] || SCENE_UI.default;
   $suggestionPanelLabel.textContent = ui.label;
-  $suggestionPanelTitle.textContent = ui.title;
+  $suggestionPanelTitle.textContent = ui.title.replace(/^AI /, '');
   $btnInterviewReview.style.display = mode === 'candidate-interview' ? '' : 'none';
   $btnJudgingScore.style.display = mode === 'ai-judge' ? '' : 'none';
   updateDeepControls();
@@ -209,6 +210,7 @@ function onSceneModeChange() {
       <p class="hint">${ui.emptyHint}</p>
     `;
   }
+  renderWelcome();
 }
 
 function isDeepSupportedScene(mode = $sceneMode.value) {
@@ -228,7 +230,9 @@ function updateDeepControls() {
 
   if ($btnDeepAuto) {
     $btnDeepAuto.style.display = supported ? '' : 'none';
-    $btnDeepAuto.textContent = deepModeEnabled ? '自动深度：开' : '自动深度：关';
+    $btnDeepAuto.textContent = '自动深度';
+    $btnDeepAuto.setAttribute('aria-checked', String(deepModeEnabled));
+    $btnDeepAuto.title = deepModeEnabled ? '自动深度：开' : '自动深度：关';
     $btnDeepAuto.classList.toggle('active', deepModeEnabled);
   }
 }
@@ -236,6 +240,7 @@ function updateDeepControls() {
 function toggleDeepMode() {
   if (!isDeepSupportedScene()) return;
   deepModeEnabled = !deepModeEnabled;
+  savePreference('auto-deep', String(deepModeEnabled));
   updateDeepControls();
   if (deepModeEnabled) {
     scheduleDeepSilenceCompletion();
@@ -248,6 +253,7 @@ async function loadConfig() {
   try {
     const res = await fetch('/api/config');
     appConfig = await res.json();
+    updateModelDisplay();
     if (!appConfig.hasApiKey) {
       $llmStatus.textContent = 'LLM: Key 未配置';
       $llmStatus.style.color = '#ef4444';
@@ -259,18 +265,18 @@ async function loadConfig() {
 
 async function loadAudioDevices() {
   try {
-    // 先请求权限，才能枚举设备
-    await navigator.mediaDevices.getUserMedia({ audio: true });
     const devices = await navigator.mediaDevices.enumerateDevices();
     const audioInputs = devices.filter(d => d.kind === 'audioinput');
 
-    $audioSource.innerHTML = '';
+    const selected = $audioSource.value;
+    $audioSource.innerHTML = '<option value="default">默认麦克风</option>';
     audioInputs.forEach((device, i) => {
       const opt = document.createElement('option');
       opt.value = device.deviceId;
       opt.textContent = device.label || `麦克风 ${i + 1}`;
       $audioSource.appendChild(opt);
     });
+    if (Array.from($audioSource.options).some(option => option.value === selected)) $audioSource.value = selected;
   } catch (e) {
     console.warn('枚举音频设备失败:', e);
     $audioSource.innerHTML = '<option value="default">默认麦克风</option>';
@@ -616,6 +622,7 @@ function addCommittedTurn(turn) {
   ensureSpeakerRole(turn.speakerId, turn.text);
   transcriptTurns.push(turn);
   turn.element = renderTranscriptLine(turn);
+  updateTranscriptRoleStyle(turn);
   updateSpeakerRoleControls();
 }
 
@@ -927,9 +934,8 @@ function updateSpeakerRoleControls() {
 
   const hint = document.createElement('div');
   hint.className = 'speaker-role-hint';
-  hint.textContent = speakerOrder.length === 0
-    ? `角色映射：等待识别说话人，识别后可设为 ${roles.slice(0, 2).join(' / ')}`
-    : '角色映射：已根据开场内容自动判断，不确定时保持未指定';
+  hint.textContent = '等待识别说话人';
+  hint.hidden = speakerOrder.length > 0;
   $speakerRoleControls.appendChild(hint);
 
   if (speakerOrder.length === 0) return;
@@ -980,7 +986,8 @@ function updateSpeakerRoleControls() {
     const swapButton = document.createElement('button');
     swapButton.type = 'button';
     swapButton.className = 'speaker-role-swap';
-    swapButton.textContent = '交换角色';
+    swapButton.innerHTML = uiIcon('swap');
+    swapButton.setAttribute('aria-label', '交换角色');
     swapButton.title = '交换前两位说话人的场景角色';
     swapButton.onclick = () => {
       const [first, second] = mappedSpeakers;
@@ -1003,6 +1010,7 @@ function refreshTranscriptSpeakerLabels() {
 
 function updateTranscriptLine(turn) {
   if (!turn.element) return;
+  updateTranscriptRoleStyle(turn);
   const speaker = turn.element.querySelector('.speaker-chip');
   const content = turn.element.querySelector('.transcript-content');
   const displayName = getSpeakerDisplayName(turn.speakerId);
@@ -1021,7 +1029,7 @@ async function startAudioCapture() {
   const deviceId = $audioSource.value;
   const constraints = {
     audio: {
-      deviceId: deviceId ? { exact: deviceId } : undefined,
+      deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined,
       sampleRate: { ideal: 16000 },
       channelCount: 1,
       echoCancellation: true,
@@ -1098,6 +1106,7 @@ async function startRecording() {
 
     // 再启动音频采集
     await startAudioCapture();
+    await loadAudioDevices();
 
     clearStopExportPromptTimer();
     if (!sessionStartedAt) {
@@ -1111,6 +1120,9 @@ async function startRecording() {
     $btnToggle.disabled = false;
     $btnToggle.classList.add('recording');
     setStatus('recording', '录音中');
+    welcomeSceneChosen = true;
+    savePreference('scene', $sceneMode.value);
+    updateWorkbenchState();
 
     // 清除空状态
     const emptyState = $transcriptContainer.querySelector('.empty-state');
@@ -1126,6 +1138,7 @@ async function startRecording() {
     $btnToggle.disabled = false;
     setStatus('error', '启动失败');
     $asrStatus.textContent = 'ASR: 启动失败';
+    updateWorkbenchState();
     alert('启动语音识别失败: ' + (err.message || '请检查麦克风权限'));
 
     // 清理
@@ -1160,6 +1173,7 @@ function stopRecording() {
   $btnToggle.classList.remove('recording');
   setStatus('ready', '已停止');
   $asrStatus.textContent = 'ASR: 已停止';
+  updateWorkbenchState();
   clearInterimTranscript();
 
   if (timerInterval) {
@@ -1251,7 +1265,7 @@ function renderTranscriptLine(turn) {
 function clearTranscript() {
   if (!confirm('确定要清空所有转写文字吗？')) return;
   clearInterimTranscript();
-  $transcriptContainer.innerHTML = '';
+  $transcriptContainer.innerHTML = '<div class="empty-state"><p>等待语音输入</p></div>';
   fullTranscript = '';
   newTextSinceLastTrigger = '';
   lastFinalText = '';
@@ -1280,7 +1294,8 @@ function resetDeepState() {
 
 function toggleScrollLock() {
   autoScroll = !autoScroll;
-  $btnScrollLock.textContent = autoScroll ? '自动滚动：开' : '自动滚动：关';
+  $btnScrollLock.title = autoScroll ? '自动滚动：开' : '自动滚动：关';
+  $btnScrollLock.setAttribute('aria-pressed', String(autoScroll));
   if (autoScroll) {
     $transcriptContainer.scrollTop = $transcriptContainer.scrollHeight;
   }
@@ -1744,11 +1759,6 @@ function addSuggestionGroup(rawText, groupType = 'suggestion', diagnostics = nul
   items.forEach(item => {
     const card = document.createElement('div');
     card.className = 'suggestion-card';
-    card.onclick = () => {
-      card.classList.toggle('used');
-      item.used = card.classList.contains('used');
-      updateQuestionLedgerUsage(item);
-    };
 
     if (item.tag) {
       card.classList.add(`tag-${getTagClass(item.tag)}`);
@@ -1768,6 +1778,7 @@ function addSuggestionGroup(rawText, groupType = 'suggestion', diagnostics = nul
     textEl.textContent = item.text;
 
     card.appendChild(textEl);
+    attachCardActions(card, item);
     group.appendChild(card);
     suggestionCount++;
   });
@@ -1839,11 +1850,6 @@ function addDeepSuggestionGroup(suggestions, triggerType, notice = '', diagnosti
     const recordItem = groupRecord.items[index];
     const card = document.createElement('div');
     card.className = `suggestion-card deep-card tag-${getTagClass(item.tag)}`;
-    card.onclick = () => {
-      card.classList.toggle('used');
-      recordItem.used = card.classList.contains('used');
-      updateQuestionLedgerUsage(recordItem);
-    };
 
     const meta = document.createElement('div');
     meta.className = 'deep-meta';
@@ -1871,6 +1877,7 @@ function addDeepSuggestionGroup(suggestions, triggerType, notice = '', diagnosti
     card.appendChild(meta);
     card.appendChild(textEl);
     card.appendChild(detail);
+    attachCardActions(card, recordItem);
     group.appendChild(card);
     suggestionCount++;
   });
@@ -2122,7 +2129,8 @@ function serializeSuggestionGroups() {
       selectionReason: item.selectionReason || '',
       detail: item.detail || item.basedOn || item.why || '',
       ledgerId: item.ledgerId || '',
-      used: !!item.used
+      used: !!item.used,
+      pinned: !!item.pinned
     }))
   }));
 }
@@ -2350,6 +2358,9 @@ async function uploadScript(input) {
       loadedAt: new Date().toISOString()
     };
     $scriptStatus.textContent = `已加载资料: ${data.filename} (${data.charCount} 字)`;
+    $scriptStatus.title = $scriptStatus.textContent;
+    $scriptStatus.closest('button').classList.add('loaded');
+    renderWelcome();
   } catch (err) {
     alert('上传失败: ' + err.message);
   }

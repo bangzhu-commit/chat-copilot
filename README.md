@@ -19,7 +19,7 @@
 
 不是替你编话术，不是替你编经历，而是帮你 **把天聊下去**。
 
-![demo](screenshots/demo.png)
+![浅色工作台：选择场景并开始对话](screenshots/demo.png)
 
 ## ✨ 核心功能
 
@@ -37,7 +37,7 @@
 | 🧭 **面试后复盘** | 求职面试场景支持基于完整转写生成问题清单、薄弱项和下一轮准备清单 |
 | 🏁 **评审评分表** | AI 应用评审场景支持基于完整转写和项目资料生成参考评分表，供评委复核 |
 | 📦 **会后复盘导出** | 汇总转写、AI 提示和会话信息，生成 AI 整理稿并打包导出 Markdown 与 JSON；整理失败时保留基础导出 |
-| 🌙 **深色大字界面** | 直播环境不刺眼，大字号远距离也能看清 |
+| 🎨 **浅色对话工作台** | 精简顶栏、固定追问操作区、浅桃色深度问题；支持标准/大字阅读和问题置顶 |
 
 ## 🎯 适用场景
 
@@ -234,6 +234,15 @@ AI 用在哪里：问答、总结、生成、识别、检索或自动化
 
 ## 🔎 深度追问
 
+### 工作台操作
+
+- 顶部选择场景、上传背景资料、开始或停止录音；首次打开可直接选择常用场景。
+- 左栏底部保留普通追问、深度追问和自动深度开关。深度问题以浅桃色背景、DEEP 标签和依据区分。
+- 每条问题可点击勾选图标标记已用、点击图钉置顶；置顶内容集中展示，标记会写入复盘 JSON。
+- 右上角「设置」提供麦克风选择、阅读字号和当前模型信息；模型由服务端配置，此处只展示。
+- 右上角「更多操作」提供复盘包导出、清空转写，以及对应场景的面试复盘或评分表。
+- 场景、阅读字号和自动深度偏好保存在当前浏览器。仅点击「开始」后申请麦克风权限；对话记录仍需导出保存。
+
 普通追问用于快速接话、救场和顺着聊；深度追问用于等对方说完一整段后，发现更值得追的回扣点、反差点、澄清点和风险点。
 
 - **手动深度追问**：点击「深度追问」即可基于最近一轮完整表达生成问题。
@@ -367,7 +376,8 @@ Whether you're hosting a live stream, conducting an interview, running a job int
 - ⚙️ **Custom Prompts** — Write your own system prompt for any scenario
 - 📁 **Material Upload** — Upload show notes, guest bios, customer context, resumes, job descriptions, dating context, or project cards
 - 🧭 **Post-Interview Review** — Candidate mode can generate a question list, weak spots, and next-round prep checklist
-- 🌙 **Dark, Large-Font UI** — Designed for glancing at during live sessions
+- 🎨 **Light Conversation Workspace** — Compact toolbar, fixed question actions, peach deep-question highlights, pinned questions, and adjustable reading size
+- **Settings and Menus** — Microphone selection, actual model information, scene-specific reviews, and recap export. Microphone access starts only after pressing Start.
 
 ## Quick Start
 

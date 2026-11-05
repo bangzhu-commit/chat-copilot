@@ -3,129 +3,63 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f6f5f1">
   <title>把天聊下去 · AI 副驾</title>
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <!-- ── 顶部工具栏 ─────────────────────────────────── -->
   <header class="toolbar">
-    <div class="toolbar-left">
-      <div class="brand-mark" aria-hidden="true">聊</div>
-      <div class="brand-copy">
-        <h1 class="app-title">把天聊下去</h1>
-        <span class="app-subtitle">实时对话 AI 副驾</span>
-      </div>
+    <div class="brand"><img src="logo.svg" width="42" height="42" alt="Talk"><div><h1>把天聊下去</h1><span>实时对话 AI 副驾</span></div></div>
+    <div class="scene-mode"><label for="sceneMode">场景</label><select id="sceneMode" onchange="chooseScene(this.value)">
+      <option value="live-host">直播主持</option><option value="interview">访谈采访</option>
+      <option value="recruitment">招聘面试（面试官）</option><option value="candidate-interview">求职面试</option>
+      <option value="sales-negotiation">销售谈判</option><option value="dating">相亲约会</option>
+      <option value="ai-judge">AI 应用评审</option><option value="recording">口播录制</option>
+      <option value="training">培训教学</option><option value="custom">自定义</option>
+    </select></div>
+    <button class="material-button" onclick="document.getElementById('fileInput').click()" title="上传背景资料（TXT / Markdown）"><svg class="icon" aria-hidden="true"><use href="icons.svg#upload"/></svg><span id="scriptStatus">上传背景资料</span></button>
+    <input type="file" id="fileInput" accept=".txt,.md" hidden onchange="uploadScript(this)">
+    <div class="toolbar-actions">
+      <button id="btnToggle" class="btn btn-primary record-button" onclick="toggleRecording()">开始</button><span id="elapsedTime" class="record-time" hidden>00:00:00</span>
+      <button id="settingsToggle" class="icon-button" aria-label="设置" title="设置" aria-expanded="false" aria-controls="settingsPanel" onclick="toggleWorkbenchPopover('settings')"><svg class="icon" aria-hidden="true"><use href="icons.svg#settings"/></svg></button>
+      <button id="moreToggle" class="icon-button" aria-label="更多操作" title="更多操作" aria-expanded="false" aria-controls="morePanel" onclick="toggleWorkbenchPopover('more')"><svg class="icon" aria-hidden="true"><use href="icons.svg#more"/></svg></button>
     </div>
-    <div class="toolbar-center">
-      <div class="audio-source">
-        <label for="audioSource">音频源</label>
-        <select id="audioSource">
-          <option value="default">默认麦克风</option>
-        </select>
-      </div>
-      <div class="scene-mode">
-        <label for="sceneMode">场景</label>
-        <select id="sceneMode" onchange="onSceneModeChange()">
-          <option value="live-host" selected>直播主持</option>
-          <option value="interview">访谈采访</option>
-          <option value="recruitment">招聘面试（面试官）</option>
-          <option value="candidate-interview">求职面试</option>
-          <option value="sales-negotiation">销售谈判</option>
-          <option value="dating">相亲约会</option>
-          <option value="ai-judge">AI 应用评审</option>
-          <option value="recording">口播录制</option>
-          <option value="training">培训教学</option>
-          <option value="custom">自定义</option>
-        </select>
-      </div>
-      <button id="btnToggle" class="btn btn-primary" onclick="toggleRecording()">
-        开始
-      </button>
-      <label class="btn btn-secondary upload-btn">
-        上传资料
-        <input type="file" id="fileInput" accept=".txt,.md" hidden onchange="uploadScript(this)">
-      </label>
-      <button class="btn btn-accent" onclick="manualTrigger()">
-        手动追问
-      </button>
-      <button id="btnDeepTrigger" class="btn btn-deep" onclick="manualDeepTrigger()" style="display: none;">
-        深度追问
-      </button>
-      <button id="btnDeepAuto" class="btn-small btn-deep-toggle" onclick="toggleDeepMode()" style="display: none;">
-        自动深度：关
-      </button>
-      <button id="btnInterviewReview" class="btn btn-secondary btn-review" onclick="generateInterviewReview()" style="display: none;">
-        面试复盘
-      </button>
-      <button id="btnJudgingScore" class="btn btn-secondary btn-review" onclick="generateJudgingScore()" style="display: none;">
-        生成评分表
-      </button>
-      <button id="btnExportReview" class="btn btn-secondary btn-export" onclick="exportReviewPackage('manual')">
-        导出复盘包
-      </button>
-    </div>
-    <div id="customPromptRow" class="custom-prompt-row" style="display: none;">
-      <label for="customPrompt">自定义指令</label>
-      <textarea id="customPrompt" class="custom-prompt-input" rows="2" placeholder="输入自定义指令，例如：请用英文追问、侧重技术深度..."></textarea>
-    </div>
-    <div class="toolbar-right">
-      <span id="scriptStatus" class="script-status"></span>
-    </div>
+    <section id="settingsPanel" class="popover" aria-label="设置" hidden>
+      <div class="popover-heading"><h2>设置</h2><button class="icon-button compact" aria-label="关闭设置" onclick="closePopovers(true)"><svg class="icon" aria-hidden="true"><use href="icons.svg#close"/></svg></button></div>
+      <label class="setting-row" for="audioSource"><span>音频源</span><select id="audioSource"><option value="default">默认麦克风</option></select></label>
+      <div class="setting-row"><span>普通追问</span><span id="fastModel" class="model-value">读取中</span></div>
+      <div class="setting-row"><span>深度追问</span><span id="deepModel" class="model-value">读取中</span></div>
+      <div class="setting-row"><span>会后复盘</span><span id="recapModel" class="model-value">读取中</span></div>
+      <label class="setting-row" for="fontSize"><span>阅读字号</span><select id="fontSize" onchange="setReadingSize(this.value)"><option value="standard">标准</option><option value="large">大字</option></select></label>
+    </section>
+    <section id="morePanel" class="popover more-panel" aria-label="更多操作" hidden>
+      <button id="btnExportReview" class="menu-action" onclick="exportReviewPackage('manual'); closePopovers()"><svg class="icon" aria-hidden="true"><use href="icons.svg#download"/></svg>导出复盘包</button>
+      <button id="btnInterviewReview" class="menu-action" onclick="generateInterviewReview(); closePopovers()" style="display:none">面试复盘</button>
+      <button id="btnJudgingScore" class="menu-action" onclick="generateJudgingScore(); closePopovers()" style="display:none">生成评分表</button>
+      <button class="menu-action" onclick="showScenePicker(); closePopovers()"><svg class="icon" aria-hidden="true"><use href="icons.svg#grid"/></svg>选择场景</button>
+      <button class="menu-action danger" onclick="clearTranscript(); closePopovers()"><svg class="icon" aria-hidden="true"><use href="icons.svg#trash"/></svg>清空转写</button>
+    </section>
+    <div id="customPromptRow" class="custom-prompt-row" style="display:none"><label for="customPrompt">自定义指令</label><textarea id="customPrompt" rows="2" placeholder="本次对话的目标与关注点"></textarea></div>
   </header>
-
-  <!-- ── 主内容区 ────────────────────────────────────── -->
   <main class="main-content">
-    <!-- 左侧：追问建议 -->
-    <section class="panel panel-suggestions">
-      <div class="panel-header">
-        <h2><span id="suggestionPanelLabel" class="panel-label">Cue</span><span id="suggestionPanelTitle">AI 追问建议</span></h2>
-        <span id="suggestionCount" class="badge">0</span>
-      </div>
-      <div id="suggestionsContainer" class="suggestions-list">
-        <div class="empty-state">
-          <p>等待追问建议</p>
-          <p class="hint">有对话内容后可自动生成，也可手动触发</p>
-        </div>
+    <section class="panel panel-suggestions" aria-labelledby="suggestionPanelTitle">
+      <div class="panel-header"><h2><span id="suggestionPanelLabel" hidden>Cue</span><span id="suggestionPanelTitle">追问建议</span></h2><span class="count"><span id="suggestionCount">0</span> 条</span><span id="pinnedCount" class="pinned-count" hidden></span></div>
+      <div class="suggestion-scroll"><div id="pinnedSuggestions" class="pinned-suggestions" hidden></div><div id="suggestionsContainer" class="suggestions-list"><div class="empty-state"><p>等待追问建议</p></div></div></div>
+      <div class="suggestion-actions">
+        <button id="btnManualTrigger" class="btn btn-primary" onclick="manualTrigger()" title="手动追问（Cmd / Ctrl + Enter）">追问<svg class="icon" aria-hidden="true"><use href="icons.svg#return"/></svg></button>
+        <button id="btnDeepTrigger" class="btn btn-deep" onclick="manualDeepTrigger()">深度追问</button>
+        <button id="btnDeepAuto" class="switch-control" role="switch" aria-checked="false" aria-label="自动深度追问" onclick="toggleDeepMode()">自动深度</button><span class="action-state" id="actionState">待命</span>
       </div>
     </section>
-
-    <!-- 右侧：实时转写 -->
-    <section class="panel panel-transcript">
-      <div class="panel-header">
-        <h2><span class="panel-label">Live</span>实时语音转写</h2>
-        <div class="transcript-actions">
-          <span id="charCount" class="badge">0 字</span>
-          <button class="btn-small" onclick="clearTranscript()">清空</button>
-          <button class="btn-small" id="btnScrollLock" onclick="toggleScrollLock()">自动滚动：开</button>
-        </div>
-      </div>
+    <section class="panel panel-transcript" aria-labelledby="transcriptTitle">
+      <div class="panel-header"><h2 id="transcriptTitle">转写</h2><span id="charCount" class="count">0 字</span><button id="btnScrollLock" class="icon-button compact scroll-button" onclick="toggleScrollLock()" aria-label="自动滚动" aria-pressed="true" title="自动滚动：开"><svg class="icon" aria-hidden="true"><use href="icons.svg#follow"/></svg></button></div>
       <div id="speakerRoleControls" class="speaker-role-controls" hidden></div>
-      <div id="transcriptContainer" class="transcript-list">
-        <div class="empty-state">
-          <p>等待语音输入</p>
-          <p class="hint">转写结果会实时显示在这里</p>
-        </div>
-      </div>
+      <div id="transcriptContainer" class="transcript-list"><div class="empty-state"><svg class="empty-icon" aria-hidden="true"><use href="icons.svg#mic"/></svg><p>还没开始录音</p></div></div>
     </section>
   </main>
-
-  <!-- ── 底部状态栏 ──────────────────────────────────── -->
-  <footer class="statusbar">
-    <div class="status-left">
-      <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">就绪</span>
-    </div>
-    <div class="status-center">
-      <span id="asrStatus">ASR: 未启动</span>
-      <span class="separator">|</span>
-      <span id="llmStatus">LLM: 待命</span>
-    </div>
-    <div class="status-right">
-      <span id="elapsedTime">00:00:00</span>
-    </div>
-  </footer>
-
-  <script src="question-quality.js"></script>
-  <script src="app.js"></script>
+  <footer class="statusbar" role="status"><span class="status-left"><span class="status-dot" id="statusDot"></span><span id="statusText">就绪</span></span><span id="asrStatus">ASR: 未启动</span><span id="llmStatus">LLM: 待命</span><span id="modelSummary" class="model-summary"></span></footer>
+  <dialog id="sceneDialog" aria-labelledby="sceneDialogTitle"><div class="popover-heading"><h2 id="sceneDialogTitle">选择场景</h2><button class="icon-button" onclick="document.getElementById('sceneDialog').close()" aria-label="关闭场景选择"><svg class="icon" aria-hidden="true"><use href="icons.svg#close"/></svg></button></div><div id="sceneDialogOptions" class="scene-grid"></div></dialog>
+  <script src="question-quality.js"></script><script src="workbench.js"></script><script src="app.js"></script>
 </body>
 </html>
